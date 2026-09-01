@@ -155,6 +155,7 @@ class ExplanationResult:
     weaknesses: List[str]
     recommendation_level: str
     overall_score: float
+    search_reasons: List[str] = field(default_factory=list)
     recommendation_reasons: List['RecommendationReason'] = field(default_factory=list)
 
 
@@ -186,7 +187,9 @@ class RecommendationResult:
     candidate_id: Optional[int] = None
     job_id: Optional[int] = None
     global_rank: Optional[int] = None
+    search_reasons: List[str] = field(default_factory=list)
     recommendation_reasons: List[RecommendationReason] = field(default_factory=list)
     raw_data: Dict[str, Any] = field(default_factory=dict)
+
 
 

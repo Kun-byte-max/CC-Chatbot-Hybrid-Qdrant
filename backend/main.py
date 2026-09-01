@@ -6,51 +6,31 @@ import re
 import sys
 from pathlib import Path
 
-# Add project root to sys.path so `backend` package imports succeed when running from inside backend/
-project_root = Path(__file__).resolve().parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+# Add backend directory and project root to sys.path
+backend_dir = Path(__file__).resolve().parent
+project_root = backend_dir.parent
+for p in [str(backend_dir), str(project_root)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-try:
-    from backend.config.config import MODEL
-    from backend.schemas.schemas import ChatRequest, ChatResponse
-    from backend.repositories.db import get_db
-    from backend.api.auth import router as auth_router, verify_token, request_role, request_email, get_current_user
-    from backend.api.profile import router as profile_router
-    from backend.api.employer import check_employer_access, handle_employer_context
-    from backend.api.employee import check_employee_access, handle_employee_context
-    from backend.services.llm_service import LLMService
-    from backend.services.resume_service import ResumeService
-    from backend.utils.utils import is_career_query, check_guardrails
-    from backend.services.ranking_service import (
-        get_employer_session,
-        reset_employer_session,
-        get_employer_db_context,
-        extract_employer_job_profile,
-    )
-    from backend.services.ranking_service import RankingService
-    from backend.utils.utils import is_employer_hiring_query
-    from backend.prompts.prompts import SYSTEM_PROMPT
-except ModuleNotFoundError:
-    from config.config import MODEL  # type: ignore
-    from schemas.schemas import ChatRequest, ChatResponse  # type: ignore
-    from repositories.db import get_db  # type: ignore
-    from api.auth import router as auth_router, verify_token, request_role, request_email, get_current_user  # type: ignore
-    from api.profile import router as profile_router  # type: ignore
-    from api.employer import check_employer_access, handle_employer_context  # type: ignore
-    from api.employee import check_employee_access, handle_employee_context  # type: ignore
-    from services.llm_service import LLMService  # type: ignore
-    from services.resume_service import ResumeService  # type: ignore
-    from utils.utils import is_career_query, check_guardrails  # type: ignore
-    from services.ranking_service import (  # type: ignore
-        get_employer_session,
-        reset_employer_session,
-        get_employer_db_context,
-        extract_employer_job_profile,
-    )
-    from services.ranking_service import RankingService  # type: ignore
-    from utils.utils import is_employer_hiring_query  # type: ignore
-    from prompts.prompts import SYSTEM_PROMPT  # type: ignore
+from backend.config.config import MODEL
+from backend.schemas.schemas import ChatRequest, ChatResponse
+from backend.repositories.db import get_db
+from backend.api.auth import router as auth_router, verify_token, request_role, request_email, get_current_user
+from backend.api.profile import router as profile_router
+from backend.api.employer import check_employer_access, handle_employer_context
+from backend.api.employee import check_employee_access, handle_employee_context
+from backend.services.llm_service import LLMService
+from backend.utils.utils import is_career_query, check_guardrails
+from backend.services.ranking_service import (
+    get_employer_session,
+    reset_employer_session,
+    get_employer_db_context,
+    extract_employer_job_profile,
+)
+from backend.services.ranking_service import RankingService
+from backend.utils.utils import is_employer_hiring_query
+from backend.prompts.prompts import SYSTEM_PROMPT  # type: ignore
 
 import json
 import logging
@@ -167,14 +147,15 @@ async def get_user_details(req: Request, current_user: Optional[dict] = Depends(
     }
 
 
+    base_url = os.getenv("PLATFORM_API_BASE", "https://admin.collarcheck.com/wapi").rstrip("/")
     try:
         import httpx
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            res = await client.get("https://admin.collarcheck.com/wapi/employee/user-detail", headers=headers)
+            res = await client.get(f"{base_url}/employee/user-detail", headers=headers)
             if res.status_code == 200:
                 return res.json()
 
-            # If live user-detail returns 401, fetch live API profile data via user slug
+            # If staging user-detail returns 401, fetch API profile data via user slug
             user_slug_val = (current_user.get("slug") if current_user else None) or req.headers.get("X-User-Slug")
             if user_slug_val:
                 admin_tok = os.getenv("PLATFORM_ADMIN_TOKEN", "")
@@ -184,7 +165,7 @@ async def get_user_details(req: Request, current_user: Optional[dict] = Depends(
                     "X-Auth-Token": admin_tok.replace("Bearer ", ""),
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 }
-                res_profile = await client.get(f"https://admin.collarcheck.com/wapi/auth/user-profile/{user_slug_val}", headers=admin_headers)
+                res_profile = await client.get(f"{base_url}/auth/user-profile/{user_slug_val}", headers=admin_headers)
                 if res_profile.status_code == 200:
                     return res_profile.json()
     except Exception as e:
@@ -1300,6 +1281,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
     except Exception as e:
         outcome = "error"
         err_type = type(e).__name__
+        log.exception("Unhandled error in chat endpoint: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         total_ms = timing.total_elapsed_ms()
@@ -1323,7 +1305,3 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             f"history_messages_dropped={timing.history_messages_dropped} "
             f"reply_validation_violated={r_viol_str}"
         )
-
-@app.post("/parse-resume")
-async def parse_resume(file: UploadFile = File(...)):
-    return await ResumeService.parse_resume(file)

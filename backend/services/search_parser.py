@@ -24,7 +24,10 @@ async def parse_search_query(message: str, role: str, messages: list = None, use
     
     Extract the following details from the user's message:
     - keyword: The designation, job title, or role name (e.g., "data analyst", "sales manager", "python developer"). CRITICAL: If a specific role or job title is mentioned anywhere in the user's message (e.g., "suggest me data analyst jobs", "show me civil engineer roles"), you MUST extract that exact title (e.g., "data analyst") into keyword. ONLY return null for keyword if NO specific role or job title is mentioned (e.g. "suggest me jobs", "show jobs for my profile").
-    - location: The state or city name mentioned (e.g., "pune", "maharashtra", "delhi"). If the user asks for jobs/candidates "near me", "nearby", "around me", "in my area", or "close to me", set location to the city or state from User's Stored/Current Resolved Location (e.g. if resolved location is "Pune, Maharashtra, India", set location to "Pune" or "Maharashtra").
+    - location: The state or city name EXPLICITLY mentioned in the user's message text (e.g., "pune", "maharashtra", "delhi").
+    - skill_source: "PROFILE" if the user explicitly asks for jobs based on their skills/profile (e.g., "jobs according to my skills", "jobs for me"); "QUERY" if explicit skill keywords/roles are mentioned in message; otherwise "NONE".
+    - location_source: "QUERY" if a city/state is explicitly mentioned in message; "CURRENT" if "near me", "nearby", or "around me" is used; otherwise "NONE".
+    - use_profile_skills: True if the user asks for jobs "according to my skills" or "for my profile", otherwise False.
     - skills: A list of specific skill keywords explicitly requested in the message (e.g., ["python", "javascript"]). Do not invent skills.
     - experience: Years of experience required (e.g., 0 for "fresher" or "freshers" or "no experience", 2 for "2 years", 5 for "5 years").
     - salary: Minimum salary numeric value or salary bracket if mentioned (e.g., 15000).
@@ -43,6 +46,9 @@ async def parse_search_query(message: str, role: str, messages: list = None, use
     {{
       "keyword": "string or null",
       "location": "string or null",
+      "skill_source": "PROFILE" | "QUERY" | "NONE",
+      "location_source": "QUERY" | "CURRENT" | "NONE",
+      "use_profile_skills": boolean,
       "skills": ["string"] or null,
       "experience": int or null,
       "salary": int or null,
@@ -60,15 +66,17 @@ async def parse_search_query(message: str, role: str, messages: list = None, use
         formatted_msgs = []
         for m in recent:
             if isinstance(m, dict):
-                formatted_msgs.append(f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}")
+                formatted_msgs.append(f"{str(m.get('role', 'user')).capitalize()}: {m.get('content', '')}")
+            elif hasattr(m, 'role') and hasattr(m, 'content'):
+                formatted_msgs.append(f"{str(getattr(m, 'role', 'user')).capitalize()}: {getattr(m, 'content', '')}")
             else:
-                formatted_msgs.append(f"{m.role.capitalize()}: {m.content}")
+                formatted_msgs.append(f"User: {str(m)}")
         history_str = "\n    Conversation History:\n    " + "\n    ".join(formatted_msgs) + "\n"
 
     prompt += f"""{history_str}
     User message: "{message}"
     
-    If the user's message is a follow-up, use the conversation history to fill in the missing details (like the job role or location they were previously searching for).
+    If the user's message is a refinement follow-up (e.g. "only in Delhi", "fresher jobs"), preserve relevant filters from conversation history. CRITICAL: If the user message is a general recommendation query ("show me jobs according to my skills", "jobs according to my skills", "jobs for me"), location MUST be null! Do NOT carry over a previous location (like "Delhi") or previous job title when the user specifically asks for jobs according to their skills. Do NOT carry over a specific previous job title (like "python developer") into a general near-me or profile search.
     JSON:
     """
     try:
@@ -108,35 +116,16 @@ async def parse_search_query(message: str, role: str, messages: list = None, use
             "is_search_intent": False
         }
 
+try:
+    from backend.services.location_service import resolve_location_from_db, LocationResult
+except ModuleNotFoundError:
+    from services.location_service import resolve_location_from_db, LocationResult  # type: ignore
+
 def resolve_state_id(state_name: str) -> Optional[int]:
     """
-    Query the SQLite database to resolve state name to its state ID.
+    Delegates to location_service to resolve state ID if applicable.
     """
     if not state_name:
         return None
-    state_name_lower = state_name.lower().strip()
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        # Try exact match first
-        cursor.execute(
-            "SELECT id FROM cyb_state WHERE LOWER(name) = %s AND status = 1 AND country = 101",
-            (state_name_lower,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return int(row[0])
-            
-        # Try substring match
-        cursor.execute(
-            "SELECT id FROM cyb_state WHERE LOWER(name) LIKE %s AND status = 1 AND country = 101",
-            (f"%{state_name_lower}%",)
-        )
-        row = cursor.fetchone()
-        if row:
-            return int(row[0])
-    except Exception:
-        log.exception("Failed to query state ID from SQLite")
-    finally:
-        conn.close()
-    return None
+    loc_res = resolve_location_from_db(state_name)
+    return loc_res.state_id if loc_res.resolved and loc_res.location_type == "state" else None

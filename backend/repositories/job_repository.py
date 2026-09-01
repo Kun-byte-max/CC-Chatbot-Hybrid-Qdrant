@@ -151,6 +151,7 @@ class JobRepository:
             desc = re.sub(r"\s+", " ", desc).strip()[:300]
             results.append({
                 "id": row["id"],
+                "job_title": row["job_title"],
                 "title":      row["job_title"],
                 "department": (row["dept_name"] or "").strip(),
                 "state":      row["state_name"] or "",
@@ -159,6 +160,44 @@ class JobRepository:
                 "mode":       JOB_MODE_MAP.get(row["job_mode"], "Office"),
                 "preview":    desc,
             })
+
+        if role_keyword:
+            clean_kw = role_keyword.lower().strip()
+            words = [w for w in clean_kw.split() if len(w) > 2]
+
+            def _calc_relevance(r: dict) -> float:
+                score = 0.0
+                t = (r.get("job_title") or "").lower()
+                d = (r.get("department") or "").lower()
+                desc = (r.get("preview") or "").lower()
+
+                if clean_kw in t:
+                    score += 500.0
+                elif all(w in t for w in words if len(w) > 2):
+                    score += 200.0
+                elif clean_kw in d:
+                    score += 100.0
+
+                matched_words = 0
+                for w in words:
+                    if w in t:
+                        score += 30.0
+                        matched_words += 1
+                    elif w in d:
+                        score += 15.0
+                    elif w in desc:
+                        score += 1.0
+
+                if len(words) > 1 and matched_words < len(words) and clean_kw not in t and clean_kw not in d:
+                    score *= 0.2
+
+                return score
+
+            results.sort(key=_calc_relevance, reverse=True)
+            # Filter out low-relevance noise (score < 30) if high-relevance matches exist
+            if any(_calc_relevance(r) >= 50.0 for r in results):
+                results = [r for r in results if _calc_relevance(r) >= 30.0]
+
         return results
 
     @staticmethod
@@ -253,11 +292,11 @@ class JobRepository:
 
     @staticmethod
     def get_jobs_for_skills(
-        skills: List[str], limit: int = 50, per_skill_limit: int = 20, job_mode: Optional[int] = None
+        skills: List[str], limit: int = 50, per_skill_limit: int = 20, job_mode: Optional[int] = None, city_id: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Retrieves active jobs matching ANY candidate skill via balanced per-skill candidate retrieval.
-        Optionally filters by work mode (e.g. job_mode=2 for Remote).
+        Optionally filters by work mode (e.g. job_mode=2 for Remote) and city_id.
         """
         if not skills:
             return []
@@ -270,6 +309,7 @@ class JobRepository:
         c = conn.cursor()
 
         mode_clause = " AND j.job_mode = %s" if job_mode is not None else ""
+        city_clause = " AND j.city = %s" if city_id is not None else ""
         query_template = f"""
             SELECT j.id, j.job_title, j.job_description, j.experience,
                    j.vacancy, j.job_mode, j.urgent, j.location,
@@ -287,6 +327,7 @@ class JobRepository:
             LEFT JOIN cyb_user comp ON j.company = comp.id
             WHERE j.status = 1 AND (j.is_deleted IS NULL OR j.is_deleted = 0)
               {mode_clause}
+              {city_clause}
               AND ({{where_clause}})
             ORDER BY j.id DESC LIMIT %s
         """
@@ -309,12 +350,16 @@ class JobRepository:
                     terms.extend(["php"])
 
                 conds = []
-                params = [job_mode] if job_mode is not None else []
+                params = []
+                if job_mode is not None:
+                    params.append(job_mode)
+                if city_id is not None:
+                    params.append(city_id)
+
                 for t in terms:
                     conds.append("(LOWER(j.job_title) LIKE %s OR LOWER(j.job_description) LIKE %s OR LOWER(d.name) LIKE %s)")
                     pattern = f"%{t}%"
                     params.extend([pattern, pattern, pattern])
-
 
                 where_clause = " OR ".join(conds)
                 query = query_template.format(where_clause=where_clause)
@@ -322,10 +367,22 @@ class JobRepository:
                 c.execute(query, params + [per_skill_limit])
                 rows = c.fetchall()
 
+                seen_title_company = set()
                 for row in rows:
                     j_id = row["id"]
                     if j_id not in seen_ids:
+                        t_norm = str(row.get("job_title") or "").strip().lower()
+                        c_norm = str(row.get("company_name") or "").strip().lower()
+                        words = re.findall(r"[a-zA-Z]{3,}", t_norm)
+                        stop_w = {"job", "job1", "job2", "job3", "and", "the", "for", "with", "needed", "urgently"}
+                        token_tuple = tuple(sorted([w for w in words if w not in stop_w]))
+                        dedup_key = (c_norm, token_tuple) if token_tuple else (c_norm, t_norm)
+
+                        if dedup_key in seen_title_company:
+                            continue
+
                         seen_ids.add(j_id)
+                        seen_title_company.add(dedup_key)
                         job_dict = JobRepository._map_job_row(row)
                         merged_jobs.append(job_dict)
                         if len(merged_jobs) >= limit:

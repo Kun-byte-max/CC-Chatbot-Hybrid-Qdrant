@@ -143,14 +143,4 @@ def is_employer_hiring_query(msg: str) -> bool:
     msg_lower = msg.lower()
     return any(t in msg_lower for t in EMPLOYER_TRIGGERS)
 
-def is_recommendation_query(msg: str) -> bool:
-    triggers = [
-        "recommend jobs", "recommend job", "jobs for me", "matching jobs",
-        "according to my skills", "suit my profile", "suits my profile",
-        "suitable jobs", "best jobs for my", "match my profile",
-        "recommend suitable", "recommendation", "recommendations",
-        "which jobs suit", "suitable for me", "best matching jobs",
-    ]
-    msg_lower = msg.lower()
-    return any(t in msg_lower for t in triggers)
 

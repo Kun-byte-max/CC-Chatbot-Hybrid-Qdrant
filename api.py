@@ -513,7 +513,7 @@ async def api_key_middleware(request: Request, call_next):
         or request.query_params.get("api_key")
     )
 
-    if not api_key or api_key != SEARCH_API_KEY:
+    if SEARCH_API_KEY and (not api_key or api_key != SEARCH_API_KEY):
         log.warning("Unauthorized request to %s [request_id=%s]", request.url.path, request.state.request_id)
         return JSONResponse(
             status_code=401,
@@ -923,58 +923,6 @@ def search_jobs(
 # Endpoints — Companies
 # ---------------------------------------------------------------------------
 
-@app.get("/search/companies", tags=["search"])
-def search_companies(
-    request: Request,
-    keyword:             str = Query(""),
-    limit:               int = Query(20, ge=1, le=100),
-    offset:              int = Query(0, ge=0),
-    facets:              Optional[List[str]] = Query(None),
-    industry:            Optional[List[int]] = Depends(parse_int_array("industry")),
-    country:             Optional[List[int]] = Depends(parse_int_array("country")),
-    state:               Optional[List[int]] = Depends(parse_int_array("state")),
-    city:                Optional[List[int]] = Depends(parse_int_array("city")),
-    verified_companies:  Optional[List[int]] = Depends(parse_int_array("verified_companies")),
-    benefits:            Optional[List[int]] = Depends(parse_int_array("benefits")),
-    job_mode:            Optional[List[int]] = Depends(parse_int_array("job_mode")),
-    create_date:         Optional[List[str]] = Depends(parse_str_array("create_date")),
-):
-    filters: List[str] = []
-
-    for expr in [
-        _in("industry_id",  industry),
-        _in("country",      country),
-        _in("state",        state),
-        _in("city",         city),
-        _in("benefit_ids",  benefits),
-        _in("job_mode_ids", job_mode),
-    ]:
-        if expr:
-            filters.append(expr)
-
-    # verified_companies — matches PHP verifiedCompanies()
-    # both 0 and 1 selected = no filter
-    # 1 only = is_verified_company = true
-    # 0 only = is_verified_company = false
-    if verified_companies:
-        vals = {int(v) for v in verified_companies}
-        if vals == {0, 1}:
-            pass
-        elif 1 in vals:
-            filters.append("is_verified_company = true")
-        elif 0 in vals:
-            filters.append("is_verified_company = false")
-
-    # create_date: actively hiring — between cutoff and now
-    # matches PHP: cj.create_date >= fromDate AND cj.create_date <= toDate
-    cutoff = _create_window_to_cutoff_ts(create_date)
-    if cutoff is not None:
-        filters.append(f"last_job_create_ts >= {cutoff}")
-        filters.append(f"last_job_create_ts <= {_now_ts()}")
-
-    sort_rules = ["last_job_create_ts:desc"] if not keyword else None
-
-    return search_with_fallback("companies", keyword or "", limit, offset, filters, sort=sort_rules, facets=facets)
 
 
 # ---------------------------------------------------------------------------

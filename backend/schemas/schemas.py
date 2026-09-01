@@ -63,6 +63,7 @@ class CandidateCard(BaseModel):
     skills: List[str] = []
     rating: Optional[float] = None
     url: str
+    match_reason: Optional[str] = None
 
 class OrganizationCard(BaseModel):
     org_id: Optional[int] = None

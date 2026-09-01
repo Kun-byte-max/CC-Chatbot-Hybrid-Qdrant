@@ -9,23 +9,31 @@ try:
     from backend.services.ranking_service import get_employer_session
     from backend.services.search_client import search_jobs
     from backend.services.search_parser import parse_search_query, resolve_state_id
+    from backend.services.location_service import resolve_location_from_db, LocationResult
     from backend.services.platform_api import get_closing_soon_jobs, get_nearby_organizations
     from backend.config.config import MAX_RESULTS
     from backend.services import user_data_service
     from backend.recommendation.recommendation_service import recommendation_service
     from backend.recommendation.mappers import to_candidate_profile_from_api
     from backend.utils.session_state import get_pagination_state, set_pagination_state, clear_pagination_state, set_recommendation_session
+    from backend.services.search_executor import SearchExecutor
+    from backend.services.search_planner import SearchPlanner
+    from backend.schemas.search_query import SearchQuery
 except ModuleNotFoundError:
     from utils.utils import is_employer_hiring_query
     from services.ranking_service import get_employer_session
     from services.search_client import search_jobs
     from services.search_parser import parse_search_query, resolve_state_id
+    from services.location_service import resolve_location_from_db, LocationResult  # type: ignore
     from services.platform_api import get_closing_soon_jobs, get_nearby_organizations
     from config.config import MAX_RESULTS
     from services import user_data_service  # type: ignore
     from recommendation.recommendation_service import recommendation_service  # type: ignore
     from recommendation.mappers import to_candidate_profile_from_api  # type: ignore
     from utils.session_state import get_pagination_state, set_pagination_state, clear_pagination_state, set_recommendation_session  # type: ignore
+    from services.search_executor import SearchExecutor  # type: ignore
+    from services.search_planner import SearchPlanner  # type: ignore
+    from schemas.search_query import SearchQuery  # type: ignore
 
 
 
@@ -225,8 +233,8 @@ async def handle_employee_context(
             "raw_hits": raw_jobs,
         }
 
-    # Widget 2: Organizations Near You
-    nearby_keywords = ["organizations near", "organization near", "companies near", "company near", "nearby company", "nearby companies", "near me", "local employer", "local employers"]
+    # Widget 2: Organizations Near You (Companies/Organizations explicit queries)
+    nearby_keywords = ["organizations near", "organization near", "companies near", "company near", "nearby company", "nearby companies", "employers near", "local employer", "local employers"]
     if any(kw in msg_lower for kw in nearby_keywords):
         set_gate_flags(search_parse_ran=True)
         set_decision_flags(search_query_found=True, search_executed=True)
@@ -379,14 +387,12 @@ async def handle_employee_context(
 
     valid_hits = []
     used_profile_fallback = False
+    profile_skills_for_fallback = []
+    profile_roles_for_fallback = []
     res = {"success": False, "data": [], "total": 0}
     filters = {}
 
-    if not keyword and not has_explicit_filters:
-
-
-        profile_skills_for_fallback = []
-        profile_roles_for_fallback = []
+    if not keyword:
 
         try:
             prof_data = user_profile_api_data
@@ -398,9 +404,13 @@ async def handle_employee_context(
                     user_slug=user_slug,
                     user_id=str(candidate_id or "")
                 )
-            if isinstance(prof_data, dict) and prof_data.get("status"):
+            if not prof_data and kwargs.get("user_detail"):
+                prof_data = kwargs.get("user_detail")
+
+            if isinstance(prof_data, dict):
                 api_cand_prof = to_candidate_profile_from_api(prof_data)
-                profile_skills_for_fallback = api_cand_prof.skills
+                if api_cand_prof.skills:
+                    profile_skills_for_fallback = api_cand_prof.skills
                 if api_cand_prof.current_title:
                     profile_roles_for_fallback = [api_cand_prof.current_title]
         except Exception as p_ex:
@@ -417,10 +427,156 @@ async def handle_employee_context(
         if profile_roles_for_fallback:
             search_terms.extend([str(r).strip() for r in profile_roles_for_fallback if r])
 
-        if search_terms:
+        effective_skills = list(user_skills or []) + list(profile_skills_for_fallback or [])
+        effective_roles = list(user_roles or []) + list(profile_roles_for_fallback or [])
+        user_skills_set = {str(s).lower().strip() for s in effective_skills if s}
+        user_roles_set = {str(r).lower().strip() for r in effective_roles if r}
+
+        skill_patterns = {s: p for s in user_skills_set if (p := _term_pattern(s))}
+        role_patterns = {r: p for r in user_roles_set if (p := _term_pattern(r))}
+
+        # ------------------------------------------------------------------
+        # GENERALIZATION PIPELINE STAGE 1: Build SearchSpec & Resolve Sources
+        # ------------------------------------------------------------------
+        from backend.schemas.search_spec import SearchSpec
+
+        raw_query_location = parsed.get("location")
+        is_near_me = parsed.get("location_mode") == "NEAR_ME" or "near me" in (last_user_msg or "").lower() or "nearby" in (last_user_msg or "").lower()
+        
+        loc_source = "NONE"
+        if raw_query_location:
+            loc_source = "QUERY"
+        elif is_near_me:
+            loc_source = "CURRENT"
+
+        explicit_loc = loc_source in ("QUERY", "CURRENT")
+        has_query_skill = bool(keyword or parsed.get("skills"))
+        is_acc_skills = bool(re.search(r'\b(?:according\s+to\s+my\s+skills|jobs\s+for\s+my\s+profile|jobs\s+for\s+me|matching\s+my\s+skills)\b', (last_user_msg or "").lower()))
+        rec_intent = bool(parsed.get("is_recommendation_intent")) or is_acc_skills
+
+        if has_query_skill:
+            skill_src = "QUERY"
+        elif rec_intent:
+            skill_src = "PROFILE"
+        elif explicit_loc and not has_query_skill:
+            skill_src = "PROFILE"
+        else:
+            skill_src = "NONE"
+
+        use_prof_skills = is_acc_skills or skill_src == "PROFILE" or bool(parsed.get("use_profile_skills"))
+
+        # Resolve CURRENT Location Priority: GPS/Browser -> Profile DB -> None
+        resolved_raw_loc = None
+        current_loc_missing = False
+
+        resolution_method = "none"
+        if loc_source == "QUERY":
+            resolved_raw_loc = raw_query_location
+            resolution_method = "EXPLICIT_QUERY"
+        elif loc_source == "CURRENT":
+            if user_location and isinstance(user_location, dict) and (user_location.get("state") or user_location.get("city")):
+                resolved_raw_loc = user_location.get("state") or user_location.get("city")
+                resolution_method = "GPS_REVERSE_GEOCODE"
+            elif user_location and isinstance(user_location, str) and user_location.strip():
+                resolved_raw_loc = user_location.strip()
+                resolution_method = "GPS_REVERSE_GEOCODE"
+            elif prof_data and isinstance(prof_data, dict):
+                resolved_raw_loc = prof_data.get("state") or prof_data.get("city") or prof_data.get("location")
+                resolution_method = "PROFILE_DB"
+
+            if not resolved_raw_loc:
+                current_loc_missing = True
+                log.warning("CURRENT location requested ('near me') but no GPS or Profile location available.")
+
+        loc_res = await run_in_threadpool(resolve_location_from_db, resolved_raw_loc) if (resolved_raw_loc and not current_loc_missing) else LocationResult(resolved=True, location_type="none")
+        loc_res.resolution_method = resolution_method
+
+        has_explicit_unresolved_location = False
+        if loc_source == "QUERY" and resolved_raw_loc and not loc_res.resolved:
+            has_explicit_unresolved_location = True
+            log.warning("Explicit location '%s' could not be resolved in DB. Blocking search execution.", resolved_raw_loc)
+
+        search_spec = SearchSpec(
+            skill_source=skill_src,
+            location_source=loc_source,
+            location_type=loc_res.location_type if loc_res.resolved else "unknown",
+            raw_location=resolved_raw_loc,
+            city_id=loc_res.city_id if loc_res.resolved else None,
+            state_id=loc_res.state_id if loc_res.resolved else None,
+            keywords=[keyword] if keyword else [],
+            skills=parsed.get("skills") or [],
+            experience_ids=resolve_experience_ids(parsed.get("experience"), last_user_msg) or [],
+            job_mode=job_mode_id if 'job_mode_id' in locals() else None,
+            urgent=bool(parsed.get("urgent")),
+            sort=parsed.get("sort"),
+            latitude=user_location.get("latitude") if isinstance(user_location, dict) else None,
+            longitude=user_location.get("longitude") if isinstance(user_location, dict) else None,
+            captured_at=user_location.get("captured_at") if isinstance(user_location, dict) else None,
+            resolution_method=resolution_method,
+            confidence=loc_res.confidence,
+            use_profile_skills=use_prof_skills,
+            explicit_location=explicit_loc
+        )
+
+        log.info(
+            "[LOCATION TELEMETRY] source=%s lat=%s lon=%s city=%s city_id=%s state=%s state_id=%s resolution=%s confidence=%.2f",
+            loc_source,
+            str(search_spec.latitude),
+            str(search_spec.longitude),
+            str(loc_res.city_name or resolved_raw_loc),
+            str(loc_res.city_id),
+            str(loc_res.state_name),
+            str(loc_res.state_id),
+            resolution_method,
+            loc_res.confidence
+        )
+
+        base_filters = {}
+        target_city_id = search_spec.city_id
+
+        # RULE 1 & 2: Push Hard Location Filters only when explicitly requested
+        if loc_res.resolved and explicit_loc:
+            if loc_res.location_type == "city" and loc_res.city_id:
+                base_filters["city"] = [loc_res.city_id]
+                log.info("[Pipeline] Hard City Filter applied: city_id=[%d]", loc_res.city_id)
+            elif loc_res.location_type == "state" and loc_res.state_id:
+                base_filters["state"] = [loc_res.state_id]
+                log.info("[Pipeline] Hard State Filter applied: state_id=[%d]", loc_res.state_id)
+
+        job_mode_id = None
+        mode_str = (parsed.get("job_mode") or "").lower().strip()
+        if "home" in mode_str or "wfh" in mode_str or "remote" in mode_str:
+            job_mode_id = 2
+        elif "office" in mode_str or "site" in mode_str:
+            job_mode_id = 1
+        elif "hybrid" in mode_str:
+            job_mode_id = 3
+
+        if job_mode_id:
+            base_filters["job_mode"] = [job_mode_id]
+        if parsed.get("urgent"):
+            base_filters["urgent"] = 1
+        if search_spec.experience_ids:
+            base_filters["experience"] = search_spec.experience_ids
+
+        # ------------------------------------------------------------------
+        # STAGE 2: Execute Retrieval Phase
+        # ------------------------------------------------------------------
+        hits = []
+        if has_explicit_unresolved_location:
+            hits = []
+        elif current_loc_missing:
+            return _empty_result(
+                "## LOCATION UNAVAILABLE\n"
+                "Your location details are not available in your profile or browser.\n\n"
+                "[INSTRUCTION]\n"
+                "Inform the user in one sentence that their location could not be determined "
+                "and ask them to specify a city or update their profile location."
+            )
+        elif skill_src == "PROFILE" and not keyword:
+            # Pure profile skill recommendation query (e.g. "jobs according to my skills")
             used_profile_fallback = True
             import asyncio
-
             clean_terms = []
             seen_t = set()
             for t in search_terms:
@@ -429,31 +585,8 @@ async def handle_employee_context(
                     seen_t.add(t_lower)
                     clean_terms.append(t)
 
-            with stage_timer("resolve"):
-                state_name = parsed.get("location")
-                state_id = await run_in_threadpool(resolve_state_id, state_name) if state_name else None
-                job_mode_id = None
-                mode_str = (parsed.get("job_mode") or "").lower().strip()
-                if "home" in mode_str or "wfh" in mode_str or "remote" in mode_str:
-                    job_mode_id = 2
-                elif "office" in mode_str or "site" in mode_str:
-                    job_mode_id = 1
-                elif "hybrid" in mode_str:
-                    job_mode_id = 3
-
-                base_filters = {}
-                if state_id:
-                    base_filters["state"] = [state_id]
-                if job_mode_id:
-                    base_filters["job_mode"] = [job_mode_id]
-                if parsed.get("urgent"):
-                    base_filters["urgent"] = 1
-                exp_ids = resolve_experience_ids(parsed.get("experience"), last_user_msg)
-                if exp_ids:
-                    base_filters["experience"] = exp_ids
-
             async with stage_timer_async("search_http"):
-                tasks = [search_jobs(keyword=t, **base_filters) for t in clean_terms[:5]]
+                tasks = [search_jobs(keyword=t, **base_filters) for t in clean_terms[:50]]
                 results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
             merged_hits = []
@@ -465,40 +598,31 @@ async def handle_employee_context(
                         if j_id is not None and j_id not in seen_ids:
                             seen_ids.add(j_id)
                             merged_hits.append(item)
-
             hits = merged_hits
-            res = {"success": True, "data": hits, "total": len(hits)}
-    else:
-        with stage_timer("resolve"):
-            state_name = parsed.get("location")
-            state_id = await run_in_threadpool(resolve_state_id, state_name) if state_name else None
 
-            job_mode_id = None
-            mode_str = (parsed.get("job_mode") or "").lower().strip()
-            if "home" in mode_str or "wfh" in mode_str or "remote" in mode_str:
-                job_mode_id = 2
-            elif "office" in mode_str or "site" in mode_str:
-                job_mode_id = 1
-            elif "hybrid" in mode_str:
-                job_mode_id = 3
-
-            filters = {}
+            if not hits and not explicit_loc:
+                async with stage_timer_async("search_http"):
+                    res_all = await search_jobs(**base_filters)
+                hits = res_all.get("data", [])
+        else:
+            # RULE 3: Query Skill controls retrieval phase. Do NOT replace with profile skills.
+            filters = dict(base_filters)
             if keyword:
                 filters["keyword"] = keyword
-            if state_id:
-                filters["state"] = [state_id]
-            if job_mode_id:
-                filters["job_mode"] = [job_mode_id]
-            if parsed.get("urgent"):
-                filters["urgent"] = 1
 
-            exp_ids = resolve_experience_ids(parsed.get("experience"), last_user_msg)
-            if exp_ids:
-                filters["experience"] = exp_ids
+            async with stage_timer_async("search_http"):
+                res = await search_jobs(**filters)
+            hits = res.get("data", [])
 
-        async with stage_timer_async("search_http"):
-            res = await search_jobs(**filters)
-        hits = res.get("data", [])
+        res = {"success": True, "data": hits, "total": len(hits)}
+
+        # Fallback to SearchExecutor (MySQL WHERE Pushdown) if search_jobs returns 0 hits and no explicit location constraint was set
+        if not hits and not explicit_loc and not (base_filters.get("city") or base_filters.get("state") or has_explicit_unresolved_location):
+            sq = SearchQuery(title=keyword, work_mode=parsed.get("job_mode"))
+            executor_hits = SearchExecutor.execute_search(sq)
+            if executor_hits:
+                hits = executor_hits
+                res = {"success": True, "data": hits, "total": len(hits)}
 
     if not res.get("success"):
         log.warning("search_jobs failed filters=%s", filters)
@@ -515,26 +639,62 @@ async def handle_employee_context(
     total = res.get("total", 0)
 
     if not hits:
-        searched_for = keyword or "your search"
+        searched_item = parsed.get("location") or "your requested skills"
         return _empty_result(
             f"## JOB SEARCH RESULT\n"
-            f"The search for '{searched_for}' returned 0 jobs.\n\n"
+            f"No active job listings were found matching {searched_item}.\n\n"
             "[INSTRUCTION]\n"
-            "Tell the user in one sentence that no matches were found, then offer to "
-            "broaden the search by location, job title, or work mode. "
-            "Do NOT invent job titles, companies, or counts. "
-            "Do NOT state a number of results."
+            "Inform the user in one sentence that no jobs were found matching their request "
+            "and suggest broadening their search or checking remote opportunities. Do NOT invent job listings."
         )
 
-    user_skills_set = {str(s).lower().strip() for s in (user_skills or []) if s}
-    user_roles_set = {str(r).lower().strip() for r in (user_roles or []) if r}
+    effective_skills = list(user_skills or []) + list(profile_skills_for_fallback or [])
+    effective_roles = list(user_roles or []) + list(profile_roles_for_fallback or [])
+    user_skills_set = {str(s).lower().strip() for s in effective_skills if s}
+    user_roles_set = {str(r).lower().strip() for r in effective_roles if r}
 
     skill_patterns = {s: p for s in user_skills_set if (p := _term_pattern(s))}
     role_patterns = {r: p for r in user_roles_set if (p := _term_pattern(r))}
 
     with stage_timer("rank"):
         sort_type = parsed.get("sort")
-        if sort_type == "create_ts":
+        if keyword:
+            kw_clean = keyword.lower().strip()
+            kw_words = [w for w in kw_clean.split() if len(w) > 2]
+
+            def calc_query_relevance(job: dict) -> float:
+                score = 0.0
+                j_title = str(job.get("job_title") or job.get("title") or "").lower()
+                j_dept = str(job.get("department_name") or job.get("department") or "").lower()
+                j_desc = str(job.get("job_description") or job.get("preview") or "").lower()
+
+                if kw_clean in j_title:
+                    score += 500.0
+                elif all(w in j_title for w in kw_words if len(w) > 2):
+                    score += 200.0
+                elif kw_clean in j_dept:
+                    score += 100.0
+
+                matched_words = 0
+                for w in kw_words:
+                    if w in j_title:
+                        score += 30.0
+                        matched_words += 1
+                    elif w in j_dept:
+                        score += 15.0
+                    elif w in j_desc:
+                        score += 1.0
+
+                # If multi-word query, penalize jobs matching only 1 generic word in title
+                if len(kw_words) > 1 and matched_words < len(kw_words) and kw_clean not in j_title and kw_clean not in j_dept:
+                    score *= 0.2
+
+                return score
+
+            hits.sort(key=calc_query_relevance, reverse=True)
+            if any(calc_query_relevance(h) >= 50.0 for h in hits):
+                hits = [h for h in hits if calc_query_relevance(h) >= 30.0]
+        elif sort_type == "create_ts":
             hits.sort(key=lambda x: x.get("create_ts") or 0, reverse=True)
         elif sort_type == "salary":
             hits.sort(key=lambda x: float(x.get("salary") or 0.0), reverse=True)
@@ -563,10 +723,13 @@ async def handle_employee_context(
                 return score
 
             hits.sort(key=calc_relevance, reverse=True)
+            if any(calc_relevance(h) > 0 for h in hits):
+                hits = [h for h in hits if calc_relevance(h) > 0]
 
     # Drop rows without a usable primary key, and de-duplicate
     valid_hits.clear()
     seen_ids = set()
+    seen_title_company = set()
 
     for h in hits:
         try:
@@ -576,7 +739,20 @@ async def handle_employee_context(
             continue
         if j_id in seen_ids:
             continue
+
+        title_norm = str(h.get("job_title") or h.get("title") or "").strip().lower()
+        company_norm = str(h.get("company_name") or h.get("company") or "").strip().lower()
+
+        words = re.findall(r"[a-zA-Z]{3,}", title_norm)
+        stop_w = {"job", "job1", "job2", "job3", "and", "the", "for", "with", "needed", "urgently"}
+        token_tuple = tuple(sorted([w for w in words if w not in stop_w]))
+
+        dedup_key = (company_norm, token_tuple) if token_tuple else (company_norm, title_norm)
+        if dedup_key in seen_title_company:
+            continue
+
         seen_ids.add(j_id)
+        seen_title_company.add(dedup_key)
         h["_job_id"] = j_id
         valid_hits.append(h)
 
@@ -604,6 +780,8 @@ async def handle_employee_context(
                     user_slug=user_slug,
                     user_id=str(candidate_id or "")
                 )
+            if not profile_api_data and kwargs.get("user_detail"):
+                profile_api_data = kwargs.get("user_detail")
 
             candidate_prof = to_candidate_profile_from_api(
                 profile_api_data if isinstance(profile_api_data, dict) else {},
@@ -613,10 +791,22 @@ async def handle_employee_context(
 
 
             rec_phrase_match = bool(re.search(r'\b(?:jobs\s+for\s+me|suggest\s+jobs|recommend\s+jobs|jobs\s+for\s+my\s+profile|jobs\s+matching|jobs\s+according)\b', msg_clean))
-            is_rec_intent = bool(parsed.get("is_recommendation_intent")) or used_profile_fallback or is_pagination_cmd or rec_phrase_match
+            has_loc_no_skill = bool(explicit_loc and not has_query_skill)
+            is_rec_intent = bool(parsed.get("is_recommendation_intent")) or used_profile_fallback or is_pagination_cmd or rec_phrase_match or has_loc_no_skill
+
+            log.info(
+                "[RECOMMENDATION ROUTING] query=%r skill_source=%s location_source=%s explicit_skill=%s explicit_location=%s is_rec_intent=%s recommendation_service_called=%s",
+                last_user_msg,
+                skill_src,
+                loc_source,
+                has_query_skill,
+                explicit_loc,
+                is_rec_intent,
+                bool(is_rec_intent and candidate_prof)
+            )
 
             pagination_meta = None
-            if is_rec_intent and candidate_prof and candidate_prof.skills:
+            if is_rec_intent and candidate_prof:
                 saved_p = get_pagination_state(session_id) if (is_pagination_cmd and session_id) else None
                 if saved_p and "all_recs" in saved_p:
                     import math
@@ -624,30 +814,33 @@ async def handle_employee_context(
                     total_results = len(all_recs)
                     total_pages = max(1, math.ceil(total_results / MAX_RESULTS))
                     is_oob = requested_page > total_pages
-                    target_p = max(1, min(requested_page, total_pages))
-                    page_recs = all_recs[(target_p - 1) * MAX_RESULTS : target_p * MAX_RESULTS]
+                    if is_oob:
+                        page_recs = []
+                    else:
+                        page_recs = all_recs[(requested_page - 1) * MAX_RESULTS : requested_page * MAX_RESULTS]
                     pagination_meta = {
-                        "current_page": target_p,
+                        "current_page": requested_page,
                         "per_page": MAX_RESULTS,
                         "total_results": total_results,
                         "total_pages": total_pages,
-                        "start_index": (target_p - 1) * MAX_RESULTS + 1 if total_results > 0 else 0,
-                        "end_index": min(target_p * MAX_RESULTS, total_results),
-                        "has_next": target_p < total_pages,
-                        "has_prev": target_p > 1,
+                        "start_index": (requested_page - 1) * MAX_RESULTS + 1 if not is_oob else 0,
+                        "end_index": min(requested_page * MAX_RESULTS, total_results) if not is_oob else 0,
+                        "has_next": requested_page < total_pages,
+                        "has_prev": requested_page > 1,
                         "invalid_page_num": requested_page if is_oob else None,
                         "all_recs": all_recs
                     }
                 else:
 
-                    rec_jobs_input = valid_hits if (valid_hits and has_explicit_filters and not is_rec_intent) else None
+                    rec_jobs_input = valid_hits if valid_hits else None
                     page_recs, pagination_meta, all_recs = recommendation_service.get_paginated_recommendations_for_profile(
                         candidate_prof,
                         jobs=rec_jobs_input,
-                        page=1,
+                        page=max(1, requested_page),
                         per_page=MAX_RESULTS,
                         session_id=session_id,
-                        job_mode=job_mode_id
+                        job_mode=job_mode_id,
+                        city_id=target_city_id
                     )
 
 
@@ -661,15 +854,20 @@ async def handle_employee_context(
                 if recs:
                     rec_hits = []
                     for r in recs:
-                        if not r.job_id:
+                        j_id = getattr(r, "job_id", None) if hasattr(r, "job_id") else (r.get("job_id") if isinstance(r, dict) else None)
+                        if not j_id:
                             continue
-                        rec_results_by_job_id[r.job_id] = r
-                        raw_job = getattr(r, "raw_data", {}) or {}
+                        rec_results_by_job_id[j_id] = r
+                        raw_job = getattr(r, "raw_data", {}) if hasattr(r, "raw_data") else (r.get("raw_data", {}) if isinstance(r, dict) else {})
                         hit_dict = dict(raw_job) if isinstance(raw_job, dict) else {}
-                        hit_dict["_job_id"] = r.job_id
-                        hit_dict["id"] = r.job_id
+                        hit_dict["_job_id"] = j_id
+                        hit_dict["id"] = j_id
                         if not hit_dict.get("job_title"):
-                            hit_dict["job_title"] = getattr(r.title_result, "job_title", "Job Title") or "Job Title"
+                            t_res = getattr(r, "title_result", None) if hasattr(r, "title_result") else (r.get("title_result") if isinstance(r, dict) else None)
+                            j_title = None
+                            if t_res:
+                                j_title = getattr(t_res, "job_title", None) if hasattr(t_res, "job_title") else (t_res.get("job_title") if isinstance(t_res, dict) else None)
+                            hit_dict["job_title"] = j_title or "Job Title"
                         rec_hits.append(hit_dict)
                     valid_hits.clear()
                     valid_hits.extend(rec_hits)
@@ -680,17 +878,34 @@ async def handle_employee_context(
 
 
                 sort_type = parsed.get("sort")
-                if not sort_type:
-                    valid_hits.sort(
-                        key=lambda h: rec_results_by_job_id.get(h["_job_id"]).overall_score if h["_job_id"] in rec_results_by_job_id else -1.0,
-                        reverse=True
-                    )
+                if keyword and not sort_type:
+                    kw_clean = keyword.lower().strip()
+                    def _kw_score(h):
+                        jt = (h.get("job_title") or "").lower()
+                        if jt == kw_clean:
+                            return 100.0
+                        if f" {kw_clean} " in f" {jt} " or jt.startswith(kw_clean) or jt.endswith(kw_clean):
+                            return 90.0
+                        if kw_clean in jt:
+                            return 80.0
+                        return 10.0
+                    valid_hits.sort(key=_kw_score, reverse=True)
+                elif not sort_type:
+                    def _get_overall_score(h):
+                        rec_res = rec_results_by_job_id.get(h.get("_job_id"))
+                        if not rec_res:
+                            return -1.0
+                        if hasattr(rec_res, "overall_score"):
+                            return getattr(rec_res, "overall_score") or -1.0
+                        elif isinstance(rec_res, dict):
+                            return rec_res.get("overall_score") or -1.0
+                        return -1.0
+                    valid_hits.sort(key=_get_overall_score, reverse=True)
 
-                # If candidate has profile skills, filter out completely unrelated jobs
-                if candidate_prof and candidate_prof.skills and not is_rec_intent:
+                # Only filter by candidate profile skills if NO explicit query keyword was given by the user
+                if candidate_prof and candidate_prof.skills and not is_rec_intent and not keyword:
 
                     def _is_relevant_job(h):
-
                         rec_res = rec_results_by_job_id.get(h["_job_id"])
                         if not rec_res:
                             return False
@@ -711,7 +926,6 @@ async def handle_employee_context(
                             if sk_norm and len(sk_norm) > 2:
                                 if sk_norm in job_title_norm or job_title_norm in sk_norm:
                                     return True
-                                # Match domain keywords e.g. "frontend" in "Frontend Developer", "data" in "Data Analyst"
                                 sk_words = set(sk_str.split()) - {"developer", "engineer", "manager", "executive", "associate", "intern", "js"}
                                 jt_words = set(job_title_str.split()) - {"developer", "engineer", "manager", "executive", "associate", "intern", "js"}
                                 if sk_words and jt_words and (sk_words & jt_words):
@@ -722,25 +936,45 @@ async def handle_employee_context(
                     if relevant_hits:
                         valid_hits.clear()
                         valid_hits.extend(relevant_hits)
-                    else:
-                        valid_hits.clear()
 
         except Exception as rec_err:
             log.exception("RecommendationEngine ranking failed in job search: %s", rec_err)
 
 
-    top_hits = valid_hits[:MAX_RESULTS]
+    MAX_SNAPSHOT_CANDIDATES = 100
+    full_recs_source = (pagination_meta.get("all_recs") if (pagination_meta and "all_recs" in pagination_meta) else None) or (all_recs if ('all_recs' in locals() and all_recs) else None)
+    if full_recs_source:
+        all_rec_hits = []
+        for r in full_recs_source:
+            j_id = getattr(r, "job_id", None) if hasattr(r, "job_id") else (r.get("job_id") if isinstance(r, dict) else None)
+            if not j_id:
+                continue
+            rec_results_by_job_id[j_id] = r
+            raw_job = getattr(r, "raw_data", {}) if hasattr(r, "raw_data") else (r.get("raw_data", {}) if isinstance(r, dict) else {})
+            hit_dict = dict(raw_job) if isinstance(raw_job, dict) else {}
+            hit_dict["_job_id"] = j_id
+            hit_dict["id"] = j_id
+            if not hit_dict.get("job_title"):
+                t_res = getattr(r, "title_result", None) if hasattr(r, "title_result") else (r.get("title_result") if isinstance(r, dict) else None)
+                j_title = None
+                if t_res:
+                    j_title = getattr(t_res, "job_title", None) if hasattr(t_res, "job_title") else (t_res.get("job_title") if isinstance(t_res, dict) else None)
+                hit_dict["job_title"] = j_title or "Job Title"
+            all_rec_hits.append(hit_dict)
+        all_ranked_hits = all_rec_hits[:MAX_SNAPSHOT_CANDIDATES]
+    else:
+        all_ranked_hits = valid_hits[:MAX_SNAPSHOT_CANDIDATES]
 
     try:
         from backend.schemas.schemas import JobCard
     except ModuleNotFoundError:
         from schemas.schemas import JobCard  # type: ignore
 
-    job_cards = []
+    all_job_cards = []
     allowed_ids = set()
     compact_lines = []
 
-    for i, h in enumerate(top_hits, 1):
+    for i, h in enumerate(all_ranked_hits, 1):
         j_id = h["_job_id"]
         allowed_ids.add(j_id)
 
@@ -761,8 +995,6 @@ async def handle_employee_context(
         else:
             mode = JOB_MODE_FALLBACK
         vacancy = h.get("vacancy")
-
-
 
         rec_res = rec_results_by_job_id.get(j_id)
         if rec_res and rec_res.explanation_result and rec_res.explanation_result.summary:
@@ -787,7 +1019,7 @@ async def handle_employee_context(
         raw_desc = h.get("job_description")
 
         rec_res = rec_results_by_job_id.get(j_id)
-        g_rank = getattr(rec_res, "global_rank", None) if rec_res else None
+        g_rank = getattr(rec_res, "global_rank", i) if rec_res else i
         m_score = getattr(rec_res, "overall_score", None) if rec_res else None
         m_skills = getattr(rec_res.skill_result, "matched_skills", None) if (rec_res and hasattr(rec_res, "skill_result")) else None
         rec_exp = getattr(rec_res.explanation_result, "summary", None) if (rec_res and hasattr(rec_res, "explanation_result")) else None
@@ -822,8 +1054,57 @@ async def handle_employee_context(
             recommendation_reasons=rec_reasons_dto if rec_reasons_dto else None
         )
 
-        job_cards.append(job_card)
-        compact_lines.append(f"{i}. {title} — {company}")
+        all_job_cards.append(job_card)
+        if i <= MAX_RESULTS:
+            compact_lines.append(f"{i}. {title} — {company}")
+
+    is_oob = bool(pagination_meta and pagination_meta.get("invalid_page_num")) or (requested_page > (pagination_meta.get("total_pages") if (pagination_meta and pagination_meta.get("total_pages")) else 1))
+    if is_oob:
+        job_cards = []
+    else:
+        start_slice = (requested_page - 1) * MAX_RESULTS
+        end_slice = requested_page * MAX_RESULTS
+        job_cards = all_job_cards[start_slice:end_slice]
+    top_hits = valid_hits[:MAX_RESULTS]
+
+    import math
+    all_ranked_job_dicts = [
+        card.model_dump() if hasattr(card, "model_dump") else card.dict()
+        for card in all_job_cards
+    ]
+
+    total_candidates_cnt = (
+        pagination_meta.get("total_results")
+        if (pagination_meta and pagination_meta.get("total_results"))
+        else (len(pagination_meta["all_recs"]) if (pagination_meta and "all_recs" in pagination_meta) else len(all_job_cards))
+    )
+    total_pages_cnt = max(1, math.ceil(total_candidates_cnt / MAX_RESULTS))
+
+    if not pagination_meta:
+        pagination_meta = {
+            "current_page": requested_page,
+            "per_page": MAX_RESULTS,
+            "page_size": MAX_RESULTS,
+            "total_results": total_candidates_cnt,
+            "total_pages": total_pages_cnt,
+            "start_index": (requested_page - 1) * MAX_RESULTS + 1 if total_candidates_cnt > 0 else 0,
+            "end_index": min(requested_page * MAX_RESULTS, total_candidates_cnt),
+            "has_next": requested_page < total_pages_cnt,
+            "has_prev": requested_page > 1,
+        }
+
+    pagination_meta["search_id"] = session_id or "default_session"
+    pagination_meta["query_fingerprint"] = keyword or last_user_msg or ""
+    pagination_meta["total_results"] = total_candidates_cnt
+    pagination_meta["total_matching_results"] = total_candidates_cnt
+    pagination_meta["page_size"] = MAX_RESULTS
+    pagination_meta["total_pages"] = total_pages_cnt
+    pagination_meta["current_page"] = requested_page
+    pagination_meta["start_index"] = (requested_page - 1) * MAX_RESULTS + 1 if (total_candidates_cnt > 0 and requested_page <= total_pages_cnt) else 0
+    pagination_meta["end_index"] = min(requested_page * MAX_RESULTS, total_candidates_cnt)
+    pagination_meta["has_next"] = requested_page < total_pages_cnt
+    pagination_meta["has_prev"] = requested_page > 1
+    pagination_meta["ranked_jobs"] = all_ranked_job_dicts
 
     if session_id and top_hits:
         from backend.utils.session_state import get_recommendation_session
@@ -858,7 +1139,9 @@ async def handle_employee_context(
 
 
 
-    location_label = f" in {state_name}" if state_name else ""
+    loc_name = search_spec.raw_location if 'search_spec' in locals() else resolved_raw_loc
+    location_label = f" in {loc_name}" if loc_name else ""
+
 
     display_total = len(valid_hits)
 

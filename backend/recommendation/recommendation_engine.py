@@ -3,7 +3,7 @@ recommendation_engine.py — Master Recommendation Engine Orchestrator.
 Orchestrates all matchers, ScoreCalculator, and ExplanationGenerator.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Any
 
 try:
     from backend.recommendation.skill_matcher import SkillMatcher
@@ -53,13 +53,14 @@ class RecommendationEngine:
         self,
         candidate: CandidateProfile,
         job: JobProfile,
+        profile_status: Optional[Any] = None,
+        search_mode: Optional[Any] = None,
+        search_query_title: Optional[str] = None,
+        search_query_location: Optional[str] = None,
+        search_query_work_mode: Optional[str] = None,
     ) -> RecommendationResult:
         """
         Executes full evaluation pipeline for a candidate and job profile pair.
-
-        :param candidate: CandidateProfile object.
-        :param job: JobProfile object.
-        :return: RecommendationResult containing overall score, level, sub-results, and explanation.
         """
         if candidate is None:
             raise ValueError("CandidateProfile cannot be None.")
@@ -88,6 +89,8 @@ class RecommendationEngine:
             location_result=loc_res,
             salary_result=sal_res,
             title_result=title_res,
+            profile_status=profile_status,
+            search_mode=search_mode,
         )
 
         # 7. Explanation Generation
@@ -98,6 +101,9 @@ class RecommendationEngine:
             location_result=loc_res,
             salary_result=sal_res,
             title_result=title_res,
+            search_query_title=search_query_title,
+            search_query_location=search_query_location,
+            search_query_work_mode=search_query_work_mode,
         )
 
         # 8. Construct & Return RecommendationResult
@@ -116,6 +122,7 @@ class RecommendationEngine:
             explanation_result=exp_gen_res,
             candidate_id=candidate_id,
             job_id=job_id,
+            search_reasons=getattr(exp_gen_res, "search_reasons", []),
             recommendation_reasons=getattr(exp_gen_res, "recommendation_reasons", []),
             raw_data=getattr(job, "raw_data", {}) or {},
         )
@@ -124,14 +131,15 @@ class RecommendationEngine:
         self,
         candidate: CandidateProfile,
         jobs: List[JobProfile],
+        profile_status: Optional[Any] = None,
+        search_mode: Optional[Any] = None,
+        search_query_title: Optional[str] = None,
+        search_query_location: Optional[str] = None,
+        search_query_work_mode: Optional[str] = None,
     ) -> List[RecommendationResult]:
         """
-        Ranks and returns job recommendations for a candidate sorted by overall score descending,
-        attaching a 1-based global_rank permanently to each item post-sort.
-
-        :param candidate: CandidateProfile object.
-        :param jobs: List of JobProfile objects.
-        :return: List of RecommendationResult objects sorted descending by overall_score with global_rank assigned.
+        Ranks and returns job recommendations for a candidate sorted deterministically by
+        overall score descending with job_id tie-breaker.
         """
         if candidate is None:
             raise ValueError("CandidateProfile cannot be None.")
@@ -139,18 +147,26 @@ class RecommendationEngine:
             return []
 
         results: List[RecommendationResult] = [
-            self.recommend(candidate, job) for job in jobs
+            self.recommend(
+                candidate=candidate,
+                job=job,
+                profile_status=profile_status,
+                search_mode=search_mode,
+                search_query_title=search_query_title,
+                search_query_location=search_query_location,
+                search_query_work_mode=search_query_work_mode,
+            )
+            for job in jobs
         ]
-        # FINAL SORT by overall_score descending
-        results.sort(key=lambda r: r.overall_score, reverse=True)
+
+        # DETERMINISTIC SORT by overall_score descending, then job_id descending tie-breaker
+        results.sort(key=lambda r: (-r.overall_score, -int(r.job_id or 0)))
 
         # Assign 1-based global_rank strictly post-sort
         for idx, res in enumerate(results, start=1):
             res.global_rank = idx
 
         return results
-
-
 
     def recommend_candidates(
         self,
@@ -159,10 +175,6 @@ class RecommendationEngine:
     ) -> List[RecommendationResult]:
         """
         Ranks and returns candidate recommendations for a job sorted by overall score descending.
-
-        :param job: JobProfile object.
-        :param candidates: List of CandidateProfile objects.
-        :return: List of RecommendationResult objects sorted descending by overall_score.
         """
         if job is None:
             raise ValueError("JobProfile cannot be None.")
@@ -172,5 +184,6 @@ class RecommendationEngine:
         results: List[RecommendationResult] = [
             self.recommend(candidate, job) for candidate in candidates
         ]
-        results.sort(key=lambda r: r.overall_score, reverse=True)
+        results.sort(key=lambda r: (-r.overall_score, -int(r.candidate_id or 0)))
         return results
+

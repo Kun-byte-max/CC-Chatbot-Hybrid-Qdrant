@@ -9,16 +9,16 @@ except ModuleNotFoundError:
 
 log = logging.getLogger(__name__)
 
-CONFIG_VALID = bool(SEARCH_API_URL and SEARCH_API_KEY)
+CONFIG_VALID = bool(SEARCH_API_URL)
 if not CONFIG_VALID:
-    log.warning("SEARCH_API_URL or SEARCH_API_KEY is not set. All search API client calls will short-circuit to failure.")
+    log.warning("SEARCH_API_URL is not set. All search API client calls will short-circuit to failure.")
 
 async def _make_request(endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if not CONFIG_VALID:
         return {"success": False, "data": [], "total": 0}
     
     url = f"{SEARCH_API_URL.rstrip('/')}{endpoint}"
-    headers = {"Authorization": f"Bearer {SEARCH_API_KEY}"}
+    headers = {"X-API-Key": SEARCH_API_KEY, "Authorization": f"Bearer {SEARCH_API_KEY}"}
     
     # Filter out None values from params to keep query clean
     clean_params = {}
@@ -51,5 +51,3 @@ async def search_users(**filters) -> Dict[str, Any]:
 async def search_jobs(**filters) -> Dict[str, Any]:
     return await _make_request("/search/jobs", filters)
 
-async def search_companies(**filters) -> Dict[str, Any]:
-    return await _make_request("/search/companies", filters)

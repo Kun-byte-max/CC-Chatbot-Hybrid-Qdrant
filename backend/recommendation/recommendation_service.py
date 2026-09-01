@@ -86,7 +86,8 @@ class RecommendationService:
         candidate_profile: CandidateProfile,
         jobs: Optional[List[Dict[str, Any]]] = None,
         top_n: int = 5,
-        job_mode: Optional[int] = None
+        job_mode: Optional[int] = None,
+        city_id: Optional[int] = None
     ) -> List[RecommendationResult]:
         """
         Ranks candidate recommendations for a CandidateProfile constructed from API data.
@@ -100,19 +101,18 @@ class RecommendationService:
 
         cand_skills = candidate_profile.skills if candidate_profile else []
         log.info("[Recommendation] Candidate skills: %s", cand_skills)
-
         jobs_db = jobs
         if jobs_db is None:
             if cand_skills:
-                log.info("[Recommendation] Skill-aware job retrieval: candidate_skills_count=%d, job_mode=%s", len(cand_skills), job_mode)
-                jobs_db = JobRepository.get_jobs_for_skills(cand_skills, limit=50, job_mode=job_mode)
+                log.info("[Recommendation] Skill-aware job retrieval: candidate_skills_count=%d, job_mode=%s, city_id=%s", len(cand_skills), job_mode, city_id)
+                jobs_db = JobRepository.get_jobs_for_skills(cand_skills, limit=200, job_mode=job_mode, city_id=city_id)
                 if not jobs_db:
                     log.info("[Recommendation] No skill matches found for candidate skills %s. Returning empty recommendations.", cand_skills)
                     return []
 
             else:
                 log.info("[Recommendation] Profile has no skills. Loading active jobs fallback.")
-                jobs_db = JobRepository.get_active_jobs(limit=50)
+                jobs_db = JobRepository.get_active_jobs(limit=200)
 
         log.info("[Recommendation] Jobs retrieved: count=%d", len(jobs_db or []))
 
@@ -133,19 +133,19 @@ class RecommendationService:
             return []
 
         recommendations = self.engine.recommend_jobs(candidate_profile, job_profiles)
-        if cand_skills:
+        if cand_skills and jobs is None:
             filtered_recs = []
             for r in recommendations:
                 has_skill_match = bool(r.skill_result and r.skill_result.score > 0)
                 has_title_match = bool(r.title_result and r.title_result.match_level in ("exact", "contains", "keyword_match"))
-                if has_skill_match or has_title_match or r.overall_score >= 50.0:
+                if has_skill_match or has_title_match or r.overall_score >= 40.0:
                     filtered_recs.append(r)
-            recommendations = filtered_recs
+            if filtered_recs:
+                recommendations = filtered_recs
             for idx, res in enumerate(recommendations, start=1):
                 res.global_rank = idx
 
         log.info("[Recommendation] Jobs scored: count=%d", len(recommendations))
-
 
         final_recs = recommendations[:top_n]
         log.info("[Recommendation] Recommendations returned: count=%d", len(final_recs))
@@ -177,7 +177,8 @@ class RecommendationService:
         page: int = 1,
         per_page: int = 5,
         session_id: Optional[str] = None,
-        job_mode: Optional[int] = None
+        job_mode: Optional[int] = None,
+        city_id: Optional[int] = None
     ) -> Tuple[List[RecommendationResult], Dict[str, Any], List[RecommendationResult]]:
         """
         Ranks all candidate pool jobs and applies post-ranking pagination slicing.
@@ -185,7 +186,7 @@ class RecommendationService:
         Returns (page_slice_recommendations, pagination_metadata_dict, all_ranked_recommendations).
         """
         import math
-        all_recs = self.get_recommendations_for_profile(candidate_profile, jobs=jobs, top_n=50, job_mode=job_mode)
+        all_recs = self.get_recommendations_for_profile(candidate_profile, jobs=jobs, top_n=200, job_mode=job_mode, city_id=city_id)
 
         total_results = len(all_recs)
         total_pages = max(1, math.ceil(total_results / per_page))

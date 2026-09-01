@@ -1365,10 +1365,17 @@
       initAuthState();
     }
 
-    let userLocation = sessionStorage.getItem('cc_user_location') || null;
-    let userCoords = null;
+    let userLocationObj = null;
+    try {
+      const storedLocStr = sessionStorage.getItem('cc_user_location_obj');
+      if (storedLocStr) userLocationObj = JSON.parse(storedLocStr);
+    } catch (e) {}
+
+    let userLocation = userLocationObj ? userLocationObj.city : (sessionStorage.getItem('cc_user_location') || null);
+    let userCoords = userLocationObj ? { latitude: userLocationObj.latitude, longitude: userLocationObj.longitude } : null;
     let currentUserDetail = null;
     let currentWidgetsData = null;
+    const clientJobPaginationStore = {};
 
     function isNearbyQuery(text) {
       return /\b(near\s+me|nearby|around\s+me|close\s+to\s+me|in\s+my\s+area|closest|organizations\s+near|companies\s+near)\b/i.test(text || "");
@@ -1378,7 +1385,7 @@
       return new Promise((resolve) => {
         if (!navigator.geolocation) {
           console.warn("Geolocation API not supported");
-          resolve(null);
+          resolve({ error: "UNSUPPORTED" });
           return;
         }
         navigator.geolocation.getCurrentPosition(
@@ -1387,7 +1394,7 @@
           },
           (err) => {
             console.warn("Geolocation permission denied or failed:", err.message);
-            resolve(null);
+            resolve({ error: err.code === 1 ? "DENIED" : "FAILED" });
           },
           { timeout: 8000, maximumAge: 600000 }
         );
@@ -1395,6 +1402,43 @@
     }
 
     async function reverseGeocodeCoords(lat, lon) {
+      // 1. Primary Geocoder: BigDataCloud
+      try {
+        const resp = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`);
+        if (resp.ok) {
+          const data = await resp.json();
+          const city = data.city || data.locality || data.principalSubdivision;
+          const state = data.principalSubdivision || data.region;
+          if (city) {
+            console.log("[ReverseGeocode] Primary (BigDataCloud) success:", city, state);
+            return { city, state };
+          }
+        }
+      } catch (e) {
+        console.warn("[ReverseGeocode] Primary geocoder failed:", e);
+      }
+
+      // 2. Secondary Fallback Geocoder (Sequential): OpenStreetMap Nominatim
+      try {
+        console.log("[ReverseGeocode] Triggering Secondary Fallback Geocoder (Nominatim)...");
+        const resp = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`, {
+          headers: { 'User-Agent': 'CollarCheck-AI-Assistant/1.0' }
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          const addr = data.address || {};
+          const city = addr.city || addr.town || addr.village || addr.county;
+          const state = addr.state;
+          if (city) {
+            console.log("[ReverseGeocode] Secondary (Nominatim) success:", city, state);
+            return { city, state };
+          }
+        }
+      } catch (e) {
+        console.warn("[ReverseGeocode] Secondary geocoder failed:", e);
+      }
+
+      // 3. Backend Fallback Endpoint
       try {
         const resp = await fetch(`${backendURL}/reverse-geocode`, {
           method: 'POST',
@@ -1850,17 +1894,52 @@
       const text = input.value.trim();
       if (!text) return;
 
-      // Request location once if nearby keywords are used and location is not yet stored
-      if (isNearbyQuery(text) && !userLocation) {
-        showToast('📍 Requesting location permission...', '#00C2A8');
-        const coords = await getUserCoordinates();
-        if (coords) {
-          userCoords = coords;
-          const resolvedLoc = await reverseGeocodeCoords(coords.latitude, coords.longitude);
-          if (resolvedLoc) {
-            userLocation = resolvedLoc;
-            sessionStorage.setItem('cc_user_location', userLocation);
-            showToast(`📍 Location set: ${userLocation}`, '#00C2A8');
+      // Intent-Gated Location Trigger (30-Minute TTL Check)
+      if (isNearbyQuery(text)) {
+        let needFreshLocation = true;
+        try {
+          const cachedLocStr = sessionStorage.getItem('cc_user_location_obj');
+          if (cachedLocStr) {
+            const cachedObj = JSON.parse(cachedLocStr);
+            const ageMs = Date.now() - new Date(cachedObj.captured_at).getTime();
+            if (ageMs < 30 * 60 * 1000) {  // 30 Minutes TTL
+              needFreshLocation = false;
+              userLocationObj = cachedObj;
+              userLocation = cachedObj.city;
+              console.log("[LocationCache] Reusing fresh location snapshot (Age < 30m):", cachedObj.city);
+            }
+          }
+        } catch (e) {}
+
+        if (needFreshLocation) {
+          showToast('📍 Requesting location permission...', '#00C2A8');
+          const coordsResult = await getUserCoordinates();
+          if (coordsResult && !coordsResult.error) {
+            userCoords = coordsResult;
+            const geocodeRes = await reverseGeocodeCoords(coordsResult.latitude, coordsResult.longitude);
+            const cityName = typeof geocodeRes === 'object' && geocodeRes ? geocodeRes.city : (typeof geocodeRes === 'string' ? geocodeRes : null);
+            const stateName = typeof geocodeRes === 'object' && geocodeRes ? geocodeRes.state : null;
+
+            if (cityName) {
+              userLocationObj = {
+                source: "CURRENT",
+                latitude: coordsResult.latitude,
+                longitude: coordsResult.longitude,
+                city: cityName,
+                state: stateName,
+                captured_at: new Date().toISOString()
+              };
+              userLocation = cityName;
+              sessionStorage.setItem('cc_user_location_obj', JSON.stringify(userLocationObj));
+              sessionStorage.setItem('cc_user_location', userLocation);
+              showToast(`📍 Location acquired: ${userLocation}`, '#00C2A8');
+            } else {
+              showToast('⚠️ Could not resolve city name from GPS. Please specify city.', '#e05252');
+            }
+          } else if (coordsResult && coordsResult.error === "DENIED") {
+            showToast('⚠️ Location permission denied. Please allow access or specify a city.', '#e05252');
+          } else {
+            showToast('⚠️ GPS unavailable. Please specify a city.', '#e05252');
           }
         }
       }
@@ -1875,13 +1954,18 @@
       document.getElementById('sendBtn').disabled = true;
       addTypingIndicator();
 
+      let currentSessionId = sessionStorage.getItem('cc_session_id');
+      if (!currentSessionId) {
+        currentSessionId = 'sess_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
+        sessionStorage.setItem('cc_session_id', currentSessionId);
+      }
+
       try {
         const body = {
+          session_id: currentSessionId,
           messages: conversationHistory,
           resume_context: resumeContext || undefined,
-          user_location: userLocation || undefined,
-          latitude: userCoords ? userCoords.latitude : undefined,
-          longitude: userCoords ? userCoords.longitude : undefined,
+          user_location: userLocationObj || userLocation || undefined,
           user_detail: currentUserDetail || undefined,
           widgets_data: currentWidgetsData || undefined
         };
@@ -1918,7 +2002,8 @@
         let html = renderMarkdown(reply);
         const results = data.results || data.jobs || data.candidates;
         if (results && results.length > 0) {
-          html += renderCardsHtml(results, data.result_type || (data.jobs ? 'jobs' : 'candidates'), data.pagination);
+          const containerId = 'job_container_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+          html += renderCardsHtml(results, data.result_type || (data.jobs ? 'jobs' : 'candidates'), data.pagination, containerId);
         }
         addBotMessage(html);
 
@@ -1951,185 +2036,286 @@
       clearResume();
     }
 
-    function renderCardsHtml(results, resultType, pagination) {
-      if (!results || !results.length) return '';
-      
+    function changeClientJobPage(delta, containerId) {
+      const store = clientJobPaginationStore[containerId];
+      if (!store) return;
+
+      const newPage = store.currentPage + delta;
+      if (newPage < 1 || newPage > store.totalPages) return;
+
+      store.currentPage = newPage;
+      renderClientJobPage(containerId);
+    }
+
+    function renderClientJobPage(containerId) {
+      const store = clientJobPaginationStore[containerId];
+      const containerWrapper = document.getElementById(containerId);
+      if (!store || !containerWrapper) return;
+
+      const startIdx = (store.currentPage - 1) * store.pageSize;
+      const endIdx = Math.min(startIdx + store.pageSize, store.jobs.length);
+      const pageJobs = store.jobs.slice(startIdx, endIdx);
+
       let html = '';
-      if (pagination && pagination.total_results > 0) {
+      html += `
+        <div class="job-results-header" style="margin-top: 10px; margin-bottom: 6px; font-weight: 600; font-size: 13px; color: #00C2A8; display: flex; justify-content: space-between; align-items: center;">
+          <span>Recommended Jobs</span>
+          <span style="font-size: 12px; color: #565869; font-weight: 400;">Showing ${startIdx + 1}–${endIdx} of ${store.totalResults}</span>
+        </div>
+      `;
+
+      html += '<div class="cards-container">';
+      pageJobs.forEach(item => {
+        html += renderSingleCardHtml(item, store.resultType);
+      });
+      html += '</div>';
+
+      if (store.totalPages > 1) {
+        const hasPrev = store.currentPage > 1;
+        const hasNext = store.currentPage < store.totalPages;
+        const prevDisabled = !hasPrev ? 'disabled style="opacity: 0.4; cursor: not-allowed; padding: 4px 12px; border-radius: 4px; border: 1px solid #ccc; background: #fff;"' : 'style="cursor: pointer; padding: 4px 12px; border-radius: 4px; border: 1px solid #00C2A8; background: #fff; color: #00C2A8; font-weight: 600;"';
+        const nextDisabled = !hasNext ? 'disabled style="opacity: 0.4; cursor: not-allowed; padding: 4px 12px; border-radius: 4px; border: 1px solid #ccc; background: #fff;"' : 'style="cursor: pointer; padding: 4px 12px; border-radius: 4px; border: 1px solid #00C2A8; background: #fff; color: #00C2A8; font-weight: 600;"';
+
+        html += `
+          <div class="pagination-bar" style="display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 10px; padding: 8px; background: #F7F7F8; border-radius: 8px; border: 1px solid #E5E5E5;">
+            <button onclick="changeClientJobPage(-1, '${containerId}')" class="page-btn" ${prevDisabled}>◀ Previous</button>
+            <span style="font-weight: 600; font-size: 13px; color: #0D0D0D;">Page ${store.currentPage} of ${store.totalPages}</span>
+            <button onclick="changeClientJobPage(1, '${containerId}')" class="page-btn" ${nextDisabled}>Next ▶</button>
+          </div>
+        `;
+      }
+
+      containerWrapper.innerHTML = html;
+      containerWrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function renderSingleCardHtml(item, resultType) {
+      if (resultType === 'education' || item.qualification || item.university_name) {
+        const qualification = item.qualification || item.course_name || 'Degree / Qualification';
+        const institution = item.institution || item.university_name || 'Educational Institution';
+        const courseType = item.course_type || 'Full Time';
+        const location = item.location || '';
+
+        let dates = '';
+        if (item.start_date && item.end_date) {
+          dates = `${item.start_date} to ${item.end_date}`;
+        } else if (item.start_date) {
+          dates = `Started: ${item.start_date}`;
+        } else if (item.end_date) {
+          dates = `Completed: ${item.end_date}`;
+        }
+
+        const isHighest = Boolean(item.is_highest || item.ishighest);
+        const url = item.url || 'https://www.collarcheck.com/dashboard/user/education';
+        const matchReason = item.match_reason || 'Verified Academic Qualification';
+
+        return `
+          <div class="job-card edu-card">
+            <div class="card-header">
+              <div class="edu-title-group">
+                <div class="edu-icon-badge">🎓</div>
+                <div>
+                  <h4 class="card-title">${escapeHtml(qualification)}</h4>
+                  <p class="card-subtitle">🏛️ ${escapeHtml(institution)}</p>
+                </div>
+              </div>
+              ${courseType ? `<span class="badge badge-purple">${escapeHtml(courseType)}</span>` : ''}
+            </div>
+            <div class="card-details">
+              ${location ? `<span class="detail-tag">📍 ${escapeHtml(location)}</span>` : ''}
+              ${dates ? `<span class="detail-tag">📅 ${escapeHtml(dates)}</span>` : ''}
+              ${isHighest ? `<span class="detail-tag badge-gold">⭐ Highest Qualification</span>` : ''}
+            </div>
+            <div class="card-footer">
+              <span class="match-reason">${escapeHtml(matchReason)}</span>
+              <a href="${url}" target="_blank" class="card-action-btn edu-action-btn">Manage Education →</a>
+            </div>
+          </div>
+        `;
+      } else if (resultType === 'nearby_organizations' || item.org_id) {
+        const name = item.name || 'Organization';
+        const loc = item.location || [item.city, item.state].filter(Boolean).join(', ') || '';
+        const industry = item.industry || '';
+        const size = item.company_size || '';
+        const distLabel = item.distance_label || (item.distance != null ? `📍 ${item.distance} km away` : '');
+        const matchReason = item.match_reason || distLabel || '📍 Nearby Organization';
+        const url = item.url || '#';
+
+        return `
+          <div class="job-card org-card">
+            <div class="card-header">
+              <div>
+                <h4 class="card-title">${escapeHtml(name)}</h4>
+                <p class="card-subtitle">${escapeHtml(industry)}${size ? ' • ' + escapeHtml(size) : ''}</p>
+              </div>
+              ${distLabel ? `<span class="badge badge-teal">${escapeHtml(distLabel)}</span>` : ''}
+            </div>
+            <div class="card-details">
+              ${loc ? `<span class="detail-tag">📍 ${escapeHtml(loc)}</span>` : ''}
+              ${size ? `<span class="detail-tag">🏢 ${escapeHtml(size)}</span>` : ''}
+            </div>
+            <div class="card-footer">
+              <span class="match-reason">${escapeHtml(matchReason)}</span>
+              <a href="${url}" target="_blank" class="card-action-btn">View Organization →</a>
+            </div>
+          </div>
+        `;
+      } else if (resultType === 'jobs' || resultType === 'urgent_jobs' || item.job_id || item.title) {
+        const title = item.title || item.job_title || 'Job';
+        const company = item.company || item.company_name || '';
+        const department = item.department || item.department_name || '';
+        const location = item.location || '';
+        const mode = item.job_mode || '';
+        const exp = item.experience || '';
+        const salary = item.salary || '';
+        const url = item.url || '#';
+        const matchReason = item.match_reason || '';
+        const rawFull = item.description || item.job_description || item.preview || '';
+        const cleanFullDesc = cleanDescriptionText(rawFull).replace(/[\.…]+$/, '');
+        const isLong = cleanFullDesc.length > 90;
+        const vacancy = item.vacancy ? `${item.vacancy} Vacanc${item.vacancy > 1 ? 'ies' : 'y'}` : '';
+
+        return `
+          <div class="job-card">
+            <div class="card-header">
+              <div>
+                <h4 class="card-title">${escapeHtml(title)}</h4>
+                <p class="card-subtitle">${escapeHtml(company)}${department ? ' • ' + escapeHtml(department) : ''}</p>
+              </div>
+              ${mode ? `<span class="badge badge-teal">${escapeHtml(mode)}</span>` : ''}
+            </div>
+            <div class="card-details">
+              ${location ? `<span class="detail-tag">📍 ${escapeHtml(location)}</span>` : ''}
+              ${exp ? `<span class="detail-tag">💼 ${escapeHtml(exp)}</span>` : ''}
+              ${salary ? `<span class="detail-tag">💰 ${escapeHtml(salary)}</span>` : ''}
+              ${vacancy ? `<span class="detail-tag">👥 ${escapeHtml(vacancy)}</span>` : ''}
+            </div>
+            ${cleanFullDesc ? `
+              <div class="card-preview-container">
+                <p class="card-preview ${isLong ? 'collapsed' : ''}">${escapeHtml(cleanFullDesc)}</p>
+                ${isLong ? `<button type="button" class="read-more-btn" onclick="toggleReadMore(this)">Read More</button>` : ''}
+              </div>
+            ` : ''}
+            <div class="card-footer" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+              ${matchReason ? `<span class="match-reason">✨ ${escapeHtml(matchReason)}</span>` : '<span></span>'}
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <button type="button" class="card-action-btn-secondary" onclick="askChip('Why was job #${item.global_rank || 1} recommended?')" style="background: transparent; color: #00C2A8; border: 1px solid #00C2A8; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">Why this job?</button>
+                <a href="${url}" target="_blank" class="card-action-btn">Apply Now →</a>
+              </div>
+            </div>
+          </div>
+        `;
+      } else {
+        // Candidate card
+        const name = (item.name && item.name.trim()) ? item.name.trim() : 'Candidate';
+        const pos = (item.position && item.position.trim()) || (item.headline && item.headline.trim()) || 'Candidate';
+        const loc = [item.city, item.state].filter(Boolean).join(', ') || item.location || '';
+        const exp = item.experience_label || item.experience || '';
+        const skills = Array.isArray(item.skills) ? item.skills.filter(Boolean).slice(0, 4).join(', ') : '';
+        const url = item.url || '#';
+        const matchReason = item.match_reason || '';
+
+        return `
+          <div class="job-card candidate-card">
+            <div class="card-header">
+              <div>
+                <h4 class="card-title">${escapeHtml(name)}</h4>
+                <p class="card-subtitle">${escapeHtml(pos)}</p>
+              </div>
+              ${exp ? `<span class="badge badge-navy">${escapeHtml(exp)}</span>` : ''}
+            </div>
+            <div class="card-details">
+              ${loc ? `<span class="detail-tag">📍 ${escapeHtml(loc)}</span>` : ''}
+              ${skills ? `<span class="detail-tag">🛠️ ${escapeHtml(skills)}</span>` : ''}
+            </div>
+            <div class="card-footer">
+              ${matchReason ? `<span class="match-reason">✨ ${escapeHtml(matchReason)}</span>` : '<span></span>'}
+              <a href="${url}" target="_blank" class="card-action-btn">View Profile →</a>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    function renderCardsHtml(results, resultType, pagination, customContainerId) {
+      if (!results || !results.length) return '';
+
+      const containerId = customContainerId || ('job_container_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7));
+
+      const isPaginated = pagination && Array.isArray(pagination.ranked_jobs) && pagination.ranked_jobs.length > 0;
+      
+      if (isPaginated) {
+        clientJobPaginationStore[containerId] = {
+          searchId: pagination.search_id || '',
+          queryFingerprint: pagination.query_fingerprint || '',
+          jobs: pagination.ranked_jobs,
+          currentPage: pagination.current_page || 1,
+          pageSize: pagination.page_size || pagination.per_page || 5,
+          totalPages: pagination.total_pages || Math.ceil(pagination.ranked_jobs.length / 5),
+          totalResults: pagination.total_results || pagination.ranked_jobs.length,
+          resultType: resultType
+        };
+      }
+
+      const store = clientJobPaginationStore[containerId];
+      const displayResults = (store && store.jobs && store.jobs.length > 0)
+        ? store.jobs.slice((store.currentPage - 1) * store.pageSize, store.currentPage * store.pageSize)
+        : results;
+
+      let html = `<div class="cards-container-wrapper" id="${containerId}">`;
+
+      const totalRes = store ? store.totalResults : (pagination ? pagination.total_results : results.length);
+      const startIdx = store ? ((store.currentPage - 1) * store.pageSize + 1) : (pagination ? pagination.start_index : 1);
+      const endIdx = store ? Math.min(store.currentPage * store.pageSize, store.totalResults) : (pagination ? pagination.end_index : results.length);
+      const headerTitle = resultType === 'candidates' ? 'Matching Candidates' : 'Recommended Jobs';
+
+      if (totalRes > 0) {
         html += `
           <div class="job-results-header" style="margin-top: 10px; margin-bottom: 6px; font-weight: 600; font-size: 13px; color: #00C2A8; display: flex; justify-content: space-between; align-items: center;">
-            <span>Recommended Jobs</span>
-            <span style="font-size: 12px; color: #565869; font-weight: 400;">Showing ${pagination.start_index}–${pagination.end_index} of ${pagination.total_results}</span>
+            <span>${headerTitle}</span>
+            <span style="font-size: 12px; color: #565869; font-weight: 400;">Showing ${startIdx}–${endIdx} of ${totalRes}</span>
           </div>
         `;
       }
 
       html += '<div class="cards-container">';
-      results.forEach(item => {
-        if (resultType === 'education' || item.qualification || item.university_name) {
-          const qualification = item.qualification || item.course_name || 'Degree / Qualification';
-          const institution = item.institution || item.university_name || 'Educational Institution';
-          const courseType = item.course_type || 'Full Time';
-          const location = item.location || '';
-          
-          let dates = '';
-          if (item.start_date && item.end_date) {
-            dates = `${item.start_date} to ${item.end_date}`;
-          } else if (item.start_date) {
-            dates = `Started: ${item.start_date}`;
-          } else if (item.end_date) {
-            dates = `Completed: ${item.end_date}`;
-          }
-
-          const isHighest = Boolean(item.is_highest || item.ishighest);
-          const url = item.url || 'https://www.collarcheck.com/dashboard/user/education';
-          const matchReason = item.match_reason || 'Verified Academic Qualification';
-
-          html += `
-            <div class="job-card edu-card">
-              <div class="card-header">
-                <div class="edu-title-group">
-                  <div class="edu-icon-badge">🎓</div>
-                  <div>
-                    <h4 class="card-title">${escapeHtml(qualification)}</h4>
-                    <p class="card-subtitle">🏛️ ${escapeHtml(institution)}</p>
-                  </div>
-                </div>
-                ${courseType ? `<span class="badge badge-purple">${escapeHtml(courseType)}</span>` : ''}
-              </div>
-              <div class="card-details">
-                ${location ? `<span class="detail-tag">📍 ${escapeHtml(location)}</span>` : ''}
-                ${dates ? `<span class="detail-tag">📅 ${escapeHtml(dates)}</span>` : ''}
-                ${isHighest ? `<span class="detail-tag badge-gold">⭐ Highest Qualification</span>` : ''}
-              </div>
-              <div class="card-footer">
-                <span class="match-reason">${escapeHtml(matchReason)}</span>
-                <a href="${url}" target="_blank" class="card-action-btn edu-action-btn">Manage Education →</a>
-              </div>
-            </div>
-          `;
-        } else if (resultType === 'nearby_organizations' || item.org_id) {
-          const name = item.name || 'Organization';
-          const loc = item.location || [item.city, item.state].filter(Boolean).join(', ') || '';
-          const industry = item.industry || '';
-          const size = item.company_size || '';
-          const distLabel = item.distance_label || (item.distance != null ? `📍 ${item.distance} km away` : '');
-          const matchReason = item.match_reason || distLabel || '📍 Nearby Organization';
-          const url = item.url || '#';
-
-          html += `
-            <div class="job-card org-card">
-              <div class="card-header">
-                <div>
-                  <h4 class="card-title">${escapeHtml(name)}</h4>
-                  <p class="card-subtitle">${escapeHtml(industry)}${size ? ' • ' + escapeHtml(size) : ''}</p>
-                </div>
-                ${distLabel ? `<span class="badge badge-teal">${escapeHtml(distLabel)}</span>` : ''}
-              </div>
-              <div class="card-details">
-                ${loc ? `<span class="detail-tag">📍 ${escapeHtml(loc)}</span>` : ''}
-                ${size ? `<span class="detail-tag">🏢 ${escapeHtml(size)}</span>` : ''}
-              </div>
-              <div class="card-footer">
-                <span class="match-reason">${escapeHtml(matchReason)}</span>
-                <a href="${url}" target="_blank" class="card-action-btn">View Organization →</a>
-              </div>
-            </div>
-          `;
-        } else if (resultType === 'jobs' || resultType === 'urgent_jobs' || item.job_id) {
-          const title = item.title || 'Job';
-          const company = item.company || '';
-          const department = item.department || '';
-          const location = item.location || '';
-          const mode = item.job_mode || '';
-          const exp = item.experience || '';
-          const salary = item.salary || '';
-          const url = item.url || '#';
-          const matchReason = item.match_reason || '';
-          const rawFull = item.description || item.job_description || item.preview || '';
-          const cleanFullDesc = cleanDescriptionText(rawFull).replace(/[\.…]+$/, '');
-          const isLong = cleanFullDesc.length > 90;
-          const vacancy = item.vacancy ? `${item.vacancy} Vacanc${item.vacancy > 1 ? 'ies' : 'y'}` : '';
-
-          html += `
-            <div class="job-card">
-              <div class="card-header">
-                <div>
-                  <h4 class="card-title">${escapeHtml(title)}</h4>
-                  <p class="card-subtitle">${escapeHtml(company)}${department ? ' • ' + escapeHtml(department) : ''}</p>
-                </div>
-                ${mode ? `<span class="badge badge-teal">${escapeHtml(mode)}</span>` : ''}
-              </div>
-              <div class="card-details">
-                ${location ? `<span class="detail-tag">📍 ${escapeHtml(location)}</span>` : ''}
-                ${exp ? `<span class="detail-tag">💼 ${escapeHtml(exp)}</span>` : ''}
-                ${salary ? `<span class="detail-tag">💰 ${escapeHtml(salary)}</span>` : ''}
-                ${vacancy ? `<span class="detail-tag">👥 ${escapeHtml(vacancy)}</span>` : ''}
-              </div>
-              ${cleanFullDesc ? `
-                <div class="card-preview-container">
-                  <p class="card-preview ${isLong ? 'collapsed' : ''}">${escapeHtml(cleanFullDesc)}</p>
-                  ${isLong ? `<button type="button" class="read-more-btn" onclick="toggleReadMore(this)">Read More</button>` : ''}
-                </div>
-              ` : ''}
-              <div class="card-footer" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-                ${matchReason ? `<span class="match-reason">✨ ${escapeHtml(matchReason)}</span>` : '<span></span>'}
-                <div style="display: flex; gap: 8px; align-items: center;">
-                  <button type="button" class="card-action-btn-secondary" onclick="askChip('Why was job #${item.global_rank || 1} recommended?')" style="background: transparent; color: #00C2A8; border: 1px solid #00C2A8; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">Why this job?</button>
-                  <a href="${url}" target="_blank" class="card-action-btn">Apply Now →</a>
-                </div>
-              </div>
-
-            </div>
-          `;
-        } else {
-          // Candidate card
-          const name = item.name || 'Candidate';
-          const pos = item.position || item.headline || '';
-          const loc = [item.city, item.state].filter(Boolean).join(', ') || item.location || '';
-          const exp = item.experience_label || item.experience || '';
-          const skills = Array.isArray(item.skills) ? item.skills.slice(0, 4).join(', ') : '';
-          const url = item.url || '#';
-          const matchReason = item.match_reason || '';
-
-          html += `
-            <div class="job-card candidate-card">
-              <div class="card-header">
-                <div>
-                  <h4 class="card-title">${escapeHtml(name)}</h4>
-                  <p class="card-subtitle">${escapeHtml(pos)}</p>
-                </div>
-                ${exp ? `<span class="badge badge-navy">${escapeHtml(exp)}</span>` : ''}
-              </div>
-              <div class="card-details">
-                ${loc ? `<span class="detail-tag">📍 ${escapeHtml(loc)}</span>` : ''}
-                ${skills ? `<span class="detail-tag">🛠️ ${escapeHtml(skills)}</span>` : ''}
-              </div>
-              <div class="card-footer">
-                ${matchReason ? `<span class="match-reason">✨ ${escapeHtml(matchReason)}</span>` : '<span></span>'}
-                <a href="${url}" target="_blank" class="card-action-btn">View Profile →</a>
-              </div>
-            </div>
-          `;
-        }
+      displayResults.forEach(item => {
+        html += renderSingleCardHtml(item, resultType);
       });
       html += '</div>';
 
-      if (pagination && pagination.total_pages > 1) {
-        const prevDisabled = !pagination.has_prev ? 'disabled style="opacity: 0.4; cursor: not-allowed; padding: 4px 12px; border-radius: 4px; border: 1px solid #ccc; background: #fff;"' : 'style="cursor: pointer; padding: 4px 12px; border-radius: 4px; border: 1px solid #00C2A8; background: #fff; color: #00C2A8; font-weight: 600;"';
-        const nextDisabled = !pagination.has_next ? 'disabled style="opacity: 0.4; cursor: not-allowed; padding: 4px 12px; border-radius: 4px; border: 1px solid #ccc; background: #fff;"' : 'style="cursor: pointer; padding: 4px 12px; border-radius: 4px; border: 1px solid #00C2A8; background: #fff; color: #00C2A8; font-weight: 600;"';
+      const totalPages = store ? store.totalPages : (pagination ? pagination.total_pages : 1);
+      const currentPage = store ? store.currentPage : (pagination ? pagination.current_page : 1);
+      const hasPrev = store ? (store.currentPage > 1) : (pagination ? pagination.has_prev : false);
+      const hasNext = store ? (store.currentPage < store.totalPages) : (pagination ? pagination.has_next : false);
 
-        html += `
-          <div class="pagination-bar" style="display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 10px; padding: 8px; background: #F7F7F8; border-radius: 8px; border: 1px solid #E5E5E5;">
-            <button onclick="askChip('previous page')" class="page-btn" ${prevDisabled}>◀ Previous</button>
-            <span style="font-weight: 600; font-size: 13px; color: #0D0D0D;">Page ${pagination.current_page} of ${pagination.total_pages}</span>
-            <button onclick="askChip('next page')" class="page-btn" ${nextDisabled}>Next ▶</button>
-          </div>
-        `;
+      if (totalPages > 1) {
+        const prevDisabled = !hasPrev ? 'disabled style="opacity: 0.4; cursor: not-allowed; padding: 4px 12px; border-radius: 4px; border: 1px solid #ccc; background: #fff;"' : 'style="cursor: pointer; padding: 4px 12px; border-radius: 4px; border: 1px solid #00C2A8; background: #fff; color: #00C2A8; font-weight: 600;"';
+        const nextDisabled = !hasNext ? 'disabled style="opacity: 0.4; cursor: not-allowed; padding: 4px 12px; border-radius: 4px; border: 1px solid #ccc; background: #fff;"' : 'style="cursor: pointer; padding: 4px 12px; border-radius: 4px; border: 1px solid #00C2A8; background: #fff; color: #00C2A8; font-weight: 600;"';
+
+        if (store) {
+          html += `
+            <div class="pagination-bar" style="display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 10px; padding: 8px; background: #F7F7F8; border-radius: 8px; border: 1px solid #E5E5E5;">
+              <button onclick="changeClientJobPage(-1, '${containerId}')" class="page-btn" ${prevDisabled}>◀ Previous</button>
+              <span style="font-weight: 600; font-size: 13px; color: #0D0D0D;">Page ${currentPage} of ${totalPages}</span>
+              <button onclick="changeClientJobPage(1, '${containerId}')" class="page-btn" ${nextDisabled}>Next ▶</button>
+            </div>
+          `;
+        } else {
+          html += `
+            <div class="pagination-bar" style="display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 10px; padding: 8px; background: #F7F7F8; border-radius: 8px; border: 1px solid #E5E5E5;">
+              <button onclick="askChip('previous page')" class="page-btn" ${prevDisabled}>◀ Previous</button>
+              <span style="font-weight: 600; font-size: 13px; color: #0D0D0D;">Page ${currentPage} of ${totalPages}</span>
+              <button onclick="askChip('next page')" class="page-btn" ${nextDisabled}>Next ▶</button>
+            </div>
+          `;
+        }
       }
 
+      html += '</div>';
       return html;
     }
+
 
     function cleanDescriptionText(str) {
       if (!str) return '';
