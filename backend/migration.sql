@@ -45,3 +45,8 @@ CREATE TABLE IF NOT EXISTS company_alias (
 -- 4. Initial Seed Data Example (Optional/Reference)
 -- INSERT INTO designation_master (canonical_name) VALUES ('Backend Developer');
 -- INSERT INTO designation_alias (canonical_id, alias) VALUES (1, 'backend engineer'), (1, 'backend programmer'), (1, 'server-side developer');
+
+
+-- 5. Phase 5: Multi-Turn Session State Version Sequence
+ALTER TABLE cyb_chat_session ADD COLUMN version_seq INT NOT NULL DEFAULT 1;
+
