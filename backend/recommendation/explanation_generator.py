@@ -201,14 +201,6 @@ class ExplanationGenerator:
                 evidence={"job_title": job_title_name}
             ))
 
-        if not rec_reasons and score_result.recommendation_level != "Not Recommended":
-            rec_reasons.append(RecommendationReason(
-                type="overall",
-                label="Overall Fit",
-                message=f"This role is a {score_result.recommendation_level.lower()} overall.",
-                evidence={"overall_score": float(score_result.overall_score)}
-            ))
-
         full_explanation_text = " ".join([r.message for r in rec_reasons]) if rec_reasons else summary
 
         return ExplanationResult(
