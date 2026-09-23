@@ -13,6 +13,12 @@ MODEL = "gpt-4o-mini"
 SEARCH_API_URL = os.getenv("SEARCH_API_URL", "http://localhost:8000")
 SEARCH_API_KEY = os.getenv("SEARCH_API_KEY", "")
 
+JOB_MATCH_API_BASE_URL = os.getenv("JOB_MATCH_API_BASE_URL", "https://ai.collarcheck.com/jobmatch")
+JOB_MATCH_API_KEY = os.getenv("JOB_MATCH_API_KEY", "")
+JOB_MATCH_TIMEOUT_SECONDS = float(os.getenv("JOB_MATCH_TIMEOUT_SECONDS", "5.0"))
+JOB_MATCH_ENABLED = os.getenv("JOB_MATCH_ENABLED", "false").lower() in ("true", "1", "yes")
+JOB_MATCH_LIMIT = int(os.getenv("JOB_MATCH_LIMIT", "11"))
+
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "collarcheck.db"))
 
 DB_HOST = os.getenv("DB_HOST", "localhost")

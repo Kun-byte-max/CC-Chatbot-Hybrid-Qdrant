@@ -59,9 +59,9 @@ def check_guardrails(message: str) -> Optional[str]:
                 "verification platform. I can help you with:\n"
                 "- Finding jobs on CollarCheck\n"
                 "- Improving your profile rating\n"
-                "- Understanding CC ID and verification\n"
-                "- Analysing your resume\n\n"
+                "- Understanding CC ID and verification\n\n"
                 "What would you like to know about your career?"
+
             )
     return None
 

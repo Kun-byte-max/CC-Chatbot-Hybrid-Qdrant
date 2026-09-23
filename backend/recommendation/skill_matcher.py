@@ -31,6 +31,18 @@ SKILL_CANONICAL_MAP = {
     "mysql": "MySQL",
     "javascript": "JavaScript",
     "typescript": "TypeScript",
+    "recruiting": "Recruitment",
+    "recruitment": "Recruitment",
+    "recruiter": "Recruitment",
+    "hr": "HR",
+    "human resources": "HR",
+    "payroll": "Payroll",
+    "sales": "Sales",
+    "sales executive": "Sales",
+    "crm": "CRM",
+    "accounting": "Accounting",
+    "accountant": "Accounting",
+    "gst": "GST",
 }
 
 
@@ -131,7 +143,14 @@ class SkillMatcher:
         total_required = len(req_list)
         total_matched = len(matched)
 
-        score = round((total_matched / total_required) * 100.0, 2)
+        base_ratio = (total_matched / total_required) * 100.0
+        if cand_list and total_matched > 0:
+            cand_cov = (total_matched / len(cand_list)) * 100.0
+            score = round(0.85 * base_ratio + 0.15 * cand_cov, 2)
+        else:
+            score = round(base_ratio, 2)
+
+        score = max(0.0, min(100.0, score))
 
         return SkillMatchResult(
             score=score,

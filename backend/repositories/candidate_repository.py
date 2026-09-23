@@ -156,3 +156,68 @@ class CandidateRepository:
         finally:
             conn.close()
 
+    @staticmethod
+    def deduplicate_and_filter_candidate_ids(candidate_ids: List[Any]) -> List[Any]:
+        """
+        Pre-hydration filter and deduplication pipeline (Invariants #28 & #29).
+        Discards None, empty strings, whitespace-only strings, and unnormalizable objects.
+        Preserves order of first appearance.
+        """
+        if not candidate_ids:
+            return []
+
+        seen = set()
+        clean_ids = []
+
+        for raw_id in candidate_ids:
+            if raw_id is None:
+                log.warning("Candidate profile missing valid ID (None), excluding from Phase 1 qualified set")
+                continue
+
+            s_id = str(raw_id).strip()
+            if not s_id:
+                log.warning("Candidate profile missing valid ID (empty/whitespace), excluding from Phase 1 qualified set")
+                continue
+
+            if s_id in seen:
+                continue
+
+            seen.add(s_id)
+            clean_ids.append(raw_id)
+
+        return clean_ids
+
+    @staticmethod
+    def get_authoritative_candidate_count(location: str = None, role: str = None) -> int:
+        """
+        Authoritative MySQL candidate count query (Invariant #27 & Option A).
+        Calculates exact count of unique qualified database candidates matching Phase 1 filters.
+        """
+        conn = get_db()
+        c = conn.cursor()
+        try:
+            query = """
+                SELECT COUNT(DISTINCT u.id) as total_count
+                FROM cyb_user u
+                LEFT JOIN cyb_state s ON u.state = s.id AND s.country = 101
+                WHERE u.user_type = 1 AND u.status = 1 AND (u.is_deleted IS NULL OR u.is_deleted = 0)
+            """
+            params = []
+            if location:
+                query += " AND (s.name LIKE %s OR u.city LIKE %s)"
+                params.extend([f"%{location}%", f"%{location}%"])
+
+            c.execute(query, params)
+            row = c.fetchone()
+            if row:
+                if isinstance(row, dict):
+                    return int(row.get("total_count", 0))
+                return int(row[0])
+            return 0
+        except Exception:
+            log.exception("Failed to execute authoritative candidate count query")
+            return 0
+        finally:
+            conn.close()
+
+

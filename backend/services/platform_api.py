@@ -36,6 +36,10 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None, token: Optional[str
 
     url = path if path.startswith("http://") or path.startswith("https://") else f"{BASE}/{path.lstrip('/')}"
 
+    if "user-detail" in url and not auth_token:
+        log.info("Skipping external user-detail HTTP call: no auth_token provided.")
+        return {"status": False, "data": None}
+
     try:
         with httpx.Client(timeout=8.0, follow_redirects=True) as client:
             res = client.get(url, params=params, headers=_headers(auth_token))
@@ -46,8 +50,9 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None, token: Optional[str
             res.raise_for_status()
             return res.json()
     except Exception as e:
-        log.error(f"Error fetching from platform API ({url}): {e}")
+        log.warning(f"Failed to fetch from platform API ({url}): {e}")
         return {"status": False, "data": [], "error": str(e)}
+
 
 
 

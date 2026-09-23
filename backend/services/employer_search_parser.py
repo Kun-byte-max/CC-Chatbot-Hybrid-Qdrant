@@ -45,50 +45,88 @@ def resolve_fresher_work_type_id() -> Optional[int]:
 def parse_employer_query(
     query_text: str,
     existing_requirements: Optional[EmployerSearchRequirements] = None,
-    source: ProvenanceSource = ProvenanceSource.QUERY
+    source: ProvenanceSource = ProvenanceSource.QUERY,
+    user_location: Optional[Any] = None,
 ) -> EmployerSearchRequirements:
     """
-    Parses an employer search query into a canonical EmployerSearchRequirements instance.
+    Parses an employer search query into a canonical EmployerSearchRequirements instance via LLM extraction.
     If existing_requirements is provided, performs controlled conversational accumulation and replacement.
     """
+    import asyncio
+    try:
+        from backend.services.search_parser import parse_search_query
+    except ImportError:
+        from services.search_parser import parse_search_query  # type: ignore
+
     reqs = EmployerSearchRequirements()
     text = query_text.strip()
     text_lower = text.lower()
 
-    # 1. Role & Skill Parsing
-    role_val = None
-    skills_val = []
+    # Call LLM search parser for native multilingual semantic extraction
+    parsed_llm = {}
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import nest_asyncio
+            nest_asyncio.apply()
+            parsed_llm = loop.run_until_complete(parse_search_query(text, "employer", messages=[]))
+        else:
+            parsed_llm = asyncio.run(parse_search_query(text, "employer", messages=[]))
+    except Exception:
+        log.warning("LLM employer query extraction fallback to deterministic rules")
+        parsed_llm = {}
 
-    # Role & Skill Parsing
-    role_val = None
-    skills_val = []
+    # Extract Role & Skills
+    role_val = parsed_llm.get("keyword")
+    skills_val = parsed_llm.get("skills") or []
 
-    if "frontend" in text_lower:
-        role_val = "Frontend Developer"
-    elif "backend" in text_lower:
-        role_val = "Backend Developer"
-    elif "full stack" in text_lower or "fullstack" in text_lower:
-        role_val = "Full Stack Developer"
-    elif "data analyst" in text_lower:
-        role_val = "Data Analyst"
-    elif "developer" in text_lower or "dev" in text_lower:
-        role_val = "Developer"
-    else:
-        role_match = re.search(
-            r"(?:hire|need|want|looking for)\s+(?:a|an)?\s*([a-z0-9\-\s]+?)(?=\s+(?:in|with|who|under|for)|$)",
-            text_lower,
-        )
-        if role_match:
-            extracted = role_match.group(1).strip()
-            extracted = re.sub(r"^(?:to\s+)?(?:hire|need|want|find)\s+(?:a|an)?\s*", "", extracted).strip()
-            if extracted and extracted not in ("a", "an", "fresher", "full time", "part time"):
-                role_val = extracted
+    # Fallback role/skill extraction if LLM did not extract keyword
+    if not role_val:
+        if "frontend" in text_lower:
+            role_val = "Frontend Developer"
+        elif "backend" in text_lower:
+            role_val = "Backend Developer"
+        elif "full stack" in text_lower or "fullstack" in text_lower:
+            role_val = "Full Stack Developer"
+        elif "data analyst" in text_lower:
+            role_val = "Data Analyst"
+        elif "data scientist" in text_lower:
+            role_val = "Data Scientist"
+        elif "business analyst" in text_lower:
+            role_val = "Business Analyst"
+        elif "hr" in text_lower or "human resource" in text_lower:
+            role_val = "HR Manager"
+        elif "sales" in text_lower:
+            role_val = "Sales Executive"
+        elif "accountant" in text_lower or "accounting" in text_lower:
+            role_val = "Accountant"
+        elif "marketing" in text_lower:
+            role_val = "Marketing Manager"
+        elif "developer" in text_lower or "dev" in text_lower:
+            role_val = "Developer"
+        else:
+            role_match = re.search(
+                r"(?:hire|need|want|looking for)\s+(?:a|an)?\s*([a-z0-9\-\s]+?)(?=\s+(?:in|with|who|under|for)|$)",
+                text_lower,
+            )
+            if role_match:
+                extracted = role_match.group(1).strip()
+                extracted = re.sub(r"^(?:to\s+)?(?:hire|need|want|find)\s+(?:a|an)?\s*", "", extracted).strip()
+                if extracted and extracted not in ("a", "an", "fresher", "full time", "part time"):
+                    role_val = extracted
 
-    # Specific technology skill detection
+    # Skill detection fallback
     known_techs = ["react", "reactjs", "javascript", "js", "node", "nodejs", "node.js", "python", "py", "sql", "php", "next.js", "jquery"]
     for tech in known_techs:
-        if re.search(r"\b" + re.escape(tech) + r"\b", text_lower):
+        if re.search(r"\b" + re.escape(tech) + r"\b", text_lower) and tech not in skills_val:
             skills_val.append(tech)
+
+    # Apply role/skill extraction: ensure technology is populated in skills_val while preserving full role_val
+    if role_val and any(t in str(role_val).lower() for t in ["react", "python", "java", "node", "nodejs", "node.js"]):
+        tech_tokens = [t for t in ["react", "python", "java", "node", "nodejs", "node.js"] if t in str(role_val).lower()]
+        for t in tech_tokens:
+            if t not in skills_val:
+                skills_val.append(t)
 
     if role_val:
         norm_role = normalize_role_title(role_val)
@@ -99,9 +137,18 @@ def parse_employer_query(
         reqs.skills = ProvenanceValue[list](value=norm_sk, source=source)
 
     # 2. Location Parsing
+    GENERIC_NEARBY = {"me", "by me", "near me", "near by", "near by me", "nearby", "my location", "here", "around me", "close to me", "current location"}
     loc_match = re.search(r"\b(?:in|at|near|location|across)\s+([a-z\s]+?)(?=\s+(?:with|under|who|for|having)|$)", text_lower)
     if loc_match:
         loc_str = loc_match.group(1).strip()
+        if loc_str and loc_str.lower() in GENERIC_NEARBY:
+            user_city = None
+            if isinstance(user_location, dict):
+                user_city = (user_location.get("city") or user_location.get("state") or "").strip()
+            elif isinstance(user_location, str):
+                user_city = user_location.strip()
+            loc_str = user_city if user_city else None
+
         if loc_str and loc_str not in ("a", "an"):
             if loc_str.lower() == "india":
                 reqs.location = LocationRequirement(
@@ -143,6 +190,45 @@ def parse_employer_query(
                     else:
                         reqs.safe_failure = True
                         reqs.failure_reason = f"Could not resolve location: {loc_str}"
+
+    if not reqs.location:
+        is_nearby_intent = any(kw in text_lower for kw in ["near me", "near by", "nearby", "around me", "close to me"])
+        if is_nearby_intent and user_location:
+            user_city = None
+            if isinstance(user_location, dict):
+                user_city = (user_location.get("city") or user_location.get("state") or "").strip()
+            elif isinstance(user_location, str):
+                user_city = user_location.strip()
+
+            if user_city:
+                res = resolve_location_from_db(user_city)
+                if res:
+                    res_text = getattr(res, "text", None) or (res.get("text") if isinstance(res, dict) else None)
+                    res_type = getattr(res, "type", None) or (res.get("type") if isinstance(res, dict) else None)
+                    res_city_id = getattr(res, "city_id", None) or (res.get("city_id") if isinstance(res, dict) else None)
+                    res_state_id = getattr(res, "state_id", None) or (res.get("state_id") if isinstance(res, dict) else None)
+                    res_country_id = getattr(res, "country_id", None) or (res.get("country_id") if isinstance(res, dict) else None)
+
+                    if res_city_id:
+                        res_type = "city"
+                        res_state_id = None
+                    elif res_state_id:
+                        res_type = "state"
+                    elif res_country_id:
+                        res_type = "country"
+
+                    is_res = getattr(res, "resolved", None) if hasattr(res, "resolved") else (res.get("resolved") if isinstance(res, dict) else bool(res_city_id or res_state_id or res_country_id))
+
+                    if is_res:
+                        reqs.location = LocationRequirement(
+                            text=res_text or user_city.title(),
+                            type=res_type,
+                            city_id=res_city_id,
+                            state_id=res_state_id,
+                            country_id=res_country_id,
+                            source=ProvenanceSource.QUERY,
+                        )
+
 
 
     # 3. Experience Parsing

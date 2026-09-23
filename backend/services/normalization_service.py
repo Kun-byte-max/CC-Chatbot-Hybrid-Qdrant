@@ -48,20 +48,41 @@ def normalize_skill_name(raw_skill: str) -> str:
     if not raw_skill:
         return raw_skill
 
-    clean = raw_skill.strip().lower()
+    clean = re.sub(r"[\-_+]+", " ", raw_skill.strip().lower())
+    clean = re.sub(r"\s+", " ", clean).strip()
+
     SKILL_ALIASES = {
         "js": "JavaScript",
         "javascript": "JavaScript",
         "reactjs": "React",
         "react.js": "React",
+        "react js": "React",
         "react": "React",
         "nodejs": "Node.js",
         "node.js": "Node.js",
+        "node js": "Node.js",
         "node": "Node.js",
+        "nextjs": "Next.js",
+        "next.js": "Next.js",
+        "next js": "Next.js",
+        "expressjs": "Express.js",
+        "express.js": "Express.js",
+        "express js": "Express.js",
+        "express": "Express.js",
+        "vuejs": "Vue.js",
+        "vue.js": "Vue.js",
+        "vue js": "Vue.js",
+        "vue": "Vue.js",
+        "ts": "TypeScript",
+        "typescript": "TypeScript",
         "py": "Python",
         "python": "Python",
+        "java": "Java",
+        "sql": "SQL",
+        "postgres": "PostgreSQL",
+        "postgresql": "PostgreSQL",
     }
-    return SKILL_ALIASES.get(clean, raw_skill.strip())
+    return SKILL_ALIASES.get(clean, raw_skill.strip().title())
 
 
 def normalize_skills(skills: Optional[List[str]]) -> List[str]:

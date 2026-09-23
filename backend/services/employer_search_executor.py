@@ -33,9 +33,10 @@ async def execute_employer_candidate_search(
     if not request_id:
         request_id = f"req_{uuid.uuid4().hex[:8]}"
 
-    search_filters: Dict[str, Any] = {}
+    search_filters: Dict[str, Any] = {"limit": limit}
     parsed_log_lines = []
     filter_log_lines = []
+
 
     # 1. Meilisearch Transient Keyword Retrieval Aid
     keyword = requirements.to_meilisearch_keyword()
@@ -67,12 +68,10 @@ async def execute_employer_candidate_search(
     if requirements.skills and requirements.skills.value:
         parsed_log_lines.append(f"skills={requirements.skills.value} [{requirements.skills.source.value}]")
 
-    # Experience Filter
+    # Experience Parsing Log (Phase 1 Retrieval DOES NOT filter on yearExperience; Phase 2 ExperienceMatcher handles eligibility)
     if requirements.experience and requirements.experience.source in ALLOWED_HARD_FILTER_SOURCES:
         exp = requirements.experience
         if exp.min is not None:
-            search_filters["yearExperience"] = [exp.min]
-            filter_log_lines.append(f"experience_min={exp.min} [{exp.source.value}]")
             parsed_log_lines.append(f"experience_min={exp.min} [{exp.source.value}]")
 
     # Fresher Filter (Categorical work_status, NEVER min_experience=0)
@@ -148,7 +147,7 @@ async def execute_employer_candidate_search(
     # Map raw documents to StandardizedCandidateObject list
     standard_candidates = [map_doc_to_standard_candidate(doc) for doc in page_slice]
 
-    # Structured [EMPLOYER_SEARCH] & [SEARCH_FILTERS] Diagnostic Logging Block
+    # Structured [EMPLOYER_SEARCH] & Diagnostic Pipeline Survival Log Block
     log_block = (
         f"\n[EMPLOYER_SEARCH]\n"
         f"request_id={request_id}\n"
@@ -158,12 +157,15 @@ async def execute_employer_candidate_search(
         f"[SEARCH_FILTERS]\n" + ("\n".join(filter_log_lines) if filter_log_lines else "None") + "\n\n"
         f"results:\n"
         f"total_matches={metadata.total_matches}\n"
-        f"returned={metadata.returned}\n"
+        f"retrieved_count={len(raw_hits)}\n"
+        f"scored_count={len(raw_hits)}\n"
+        f"returned_count={metadata.returned}\n"
         f"page={metadata.page}\n"
         f"limit={metadata.limit}\n\n"
         f"status=SUCCESS\n"
     )
     log.info(log_block)
+
 
     raw_payload = {
         "success": True,

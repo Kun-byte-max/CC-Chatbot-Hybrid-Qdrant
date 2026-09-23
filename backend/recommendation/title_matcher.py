@@ -36,6 +36,17 @@ class TitleMatcher:
         "specialist",
         "manager",
         "lead",
+        "executive",
+        "officer",
+        "assistant",
+        "representative",
+        "associate",
+        "agent",
+        "clerk",
+        "admin",
+        "administrator",
+        "head",
+        "director",
     }
 
     def _normalize_title(self, value: Optional[Any]) -> Optional[str]:

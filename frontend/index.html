@@ -412,41 +412,38 @@
       box-shadow: 0 0 0 2px rgba(0, 194, 168, .1), var(--shadow-md);
     }
 
-    .resume-banner {
-      display: none;
-      align-items: center;
-      gap: 8px;
-      background: #f0fdf9;
-      border: 1px solid rgba(0, 194, 168, .3);
-      border-radius: 8px;
-      padding: 6px 10px;
-      font-size: 13px;
-      color: var(--cc-teal-dk);
-    }
-
-    .resume-banner.visible {
+    .suggestion-chips-container {
       display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+      margin-bottom: 4px;
     }
 
-    .resume-name {
+    .suggestion-chip {
+      background: #FFFFFF;
+      border: 1px solid #00C2A8;
+      color: #00C2A8;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 13px;
       font-weight: 500;
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .resume-remove {
-      background: none;
-      border: none;
       cursor: pointer;
-      color: #999;
-      font-size: 14px;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.02);
     }
 
-    .resume-remove:hover {
-      color: #e05252;
+    .suggestion-chip:hover {
+      background: #00C2A8;
+      color: #FFFFFF;
+      box-shadow: 0 4px 8px rgba(0, 194, 168, 0.2);
+      transform: translateY(-1px);
     }
+
+
 
     .input-row {
       display: flex;
@@ -902,6 +899,53 @@
       border-color: var(--cc-teal);
     }
 
+    /* 🏢 Candidate Company Header Strip */
+    .candidate-company-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 7px 12px;
+      margin: -14px -16px 12px -16px;
+      background: #F0FDF4;
+      border-bottom: 1px solid #DCFCE7;
+      border-top-left-radius: 9px;
+      border-top-right-radius: 9px;
+    }
+
+    .company-header-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .company-icon {
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+
+    .company-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--cc-navy);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .company-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #15803D;
+      letter-spacing: 0.4px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      background: #DCFCE7;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
     .card-header {
       display: flex;
       align-items: flex-start;
@@ -1143,7 +1187,7 @@
         <div class="hero-avatar">CC</div>
         <h1 class="hero-title" id="heroTitle">How can I help you today?</h1>
         <p class="hero-sub">Your AI assistant for CollarCheck — India's first professional identity verification
-          platform. Ask about jobs, profiles, ratings, or upload your resume.</p>
+          platform. Ask about jobs, profiles, or ratings.</p>
 
         <div class="quick-chips">
           <button class="chip" onclick="askChip('What is CollarCheck and how does it work?')">
@@ -1177,15 +1221,7 @@
     <!-- INPUT AREA -->
     <div class="input-wrapper">
       <div class="input-box">
-        <div class="resume-banner" id="resumeBanner">
-          <span>📄</span>
-          <span class="resume-name" id="resumeName"></span>
-          <button class="resume-remove" onclick="clearResume()" title="Remove">✕</button>
-        </div>
-
         <div class="input-row">
-          <button class="action-btn" onclick="document.getElementById('resumeFile').click()"
-            title="Upload Resume (PDF/TXT)">📎</button>
           <button class="action-btn" onclick="clearChat()" title="New chat">🗑️</button>
           <textarea id="msgInput" rows="1" placeholder="Message CollarCheck AI..." onkeydown="handleKey(event)"
             oninput="autoGrow(this)"></textarea>
@@ -1221,15 +1257,13 @@
     </div>
   </div>
 
-  <input type="file" id="resumeFile" accept=".txt,.pdf" onchange="handleResumeUpload(event)" />
   <div class="toast" id="toast"></div>
 
   <script>
     // ── STATE ──────────────────────────────────────
     let conversationHistory = [];
-    let resumeContext = null;
-    let resumeFileName = null;
     let backendURL = 'http://localhost:8001';
+
     localStorage.setItem('cc_backend', 'http://localhost:8001');
     const CC_WAPI_BASE_URL = 'https://api.collarcheck.com/wapi';
     let apiKey = sessionStorage.getItem('cc_api_key') || '';
@@ -1378,7 +1412,30 @@
     const clientJobPaginationStore = {};
 
     function isNearbyQuery(text) {
-      return /\b(near\s+me|nearby|around\s+me|close\s+to\s+me|in\s+my\s+area|closest|organizations\s+near|companies\s+near)\b/i.test(text || "");
+      return /\b(near\s+by(\s+me)?|near\s+me|nearby|around\s+me|close\s+to\s+me|in\s+my\s+area|closest|organizations\s+near|companies\s+near)\b/i.test(text || "");
+    }
+
+    function hasValidCoords(obj) {
+      if (!obj) return false;
+      const lat = Number(obj.latitude);
+      const lon = Number(obj.longitude);
+      return Number.isFinite(lat) && Number.isFinite(lon);
+    }
+
+    function nearbyLocationErrorMessage(errorCode) {
+      if (errorCode === "DENIED") {
+        return "I need your location to find jobs near you. Please allow location access in your browser/device settings, or specify your city (e.g., 'Nodejs developer in Delhi').";
+      }
+      if (errorCode === "UNAVAILABLE") {
+        return "I couldn't determine your current position. Please try again or specify your city (e.g., 'Nodejs developer in Mumbai').";
+      }
+      if (errorCode === "TIMEOUT") {
+        return "Location request timed out. Please try again or specify your city (e.g., 'Nodejs developer in Pune').";
+      }
+      if (errorCode === "UNSUPPORTED") {
+        return "Your browser does not support location services. Please specify a city to search nearby jobs.";
+      }
+      return "I couldn't get your location. Please allow location access or specify a city and try again.";
     }
 
     async function getUserCoordinates() {
@@ -1390,15 +1447,43 @@
         }
         navigator.geolocation.getCurrentPosition(
           (pos) => {
+            console.log("[NearbyDebug] Geolocation success");
+            console.log("[NearbyDebug] latitude:", pos.coords.latitude);
+            console.log("[NearbyDebug] longitude:", pos.coords.longitude);
             resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
           },
           (err) => {
-            console.warn("Geolocation permission denied or failed:", err.message);
-            resolve({ error: err.code === 1 ? "DENIED" : "FAILED" });
+            const code = err && err.code;
+            const error = code === 1 ? "DENIED" : code === 2 ? "UNAVAILABLE" : code === 3 ? "TIMEOUT" : "FAILED";
+            console.warn("[NearbyDebug] Geolocation error:", code, err && err.message);
+            resolve({ error });
           },
-          { timeout: 8000, maximumAge: 600000 }
+          { enableHighAccuracy: true, timeout: 12000, maximumAge: 300000 }
         );
       });
+    }
+
+    async function getIPLocationFallback() {
+      try {
+        console.log("[NearbyDebug] Attempting IP-based location fallback...");
+        const res = await fetch('https://ipapi.co/json/');
+        if (res.ok) {
+          const data = await res.json();
+          const lat = Number(data.latitude);
+          const lon = Number(data.longitude);
+          const city = data.city || data.region;
+          const state = data.region || data.country_name;
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            console.log("[IPLocationFallback] IP location success:", lat, lon, city);
+            return { latitude: lat, longitude: lon, city, state, isIPFallback: true };
+          } else if (city) {
+            return { city, state, isIPFallback: true };
+          }
+        }
+      } catch (e) {
+        console.warn("[IPLocationFallback] IP location lookup failed:", e);
+      }
+      return null;
     }
 
     async function reverseGeocodeCoords(lat, lon) {
@@ -1757,47 +1842,7 @@
       showToast('✅ Settings saved!');
     }
 
-    // ── RESUME ─────────────────────────────────────
-    async function handleResumeUpload(event) {
-      const file = event.target.files[0];
-      if (!file) return;
-      if (file.size > 2 * 1024 * 1024) { showToast('File too large. Max 2MB.', '#e05252'); return; }
-      resumeFileName = file.name;
-      hideHero();
 
-      if (file.name.endsWith('.txt')) {
-        const text = await file.text();
-        resumeContext = text.slice(0, 8000);
-        showResumeBanner();
-        addBotMessage('📄 Resume uploaded! Ask me to <strong>"analyse my resume"</strong> or <strong>"find jobs for my background"</strong> and I\'ll get started.');
-      } else if (file.name.endsWith('.pdf')) {
-        const formData = new FormData();
-        formData.append('file', file);
-        try {
-          const resp = await fetch(`${backendURL}/parse-resume`, { method: 'POST', body: formData });
-          if (!resp.ok) throw new Error();
-          const data = await resp.json();
-          resumeContext = data.text;
-          showResumeBanner();
-          addBotMessage('📄 PDF resume loaded! Ask me to <strong>"analyse my resume"</strong> and I\'ll review it thoroughly.');
-        } catch {
-          showToast('⚠️ Could not parse PDF. Try saving as .txt.', '#e05252');
-        }
-      }
-      event.target.value = '';
-    }
-
-    function showResumeBanner() {
-      document.getElementById('resumeName').textContent = '📎 ' + resumeFileName;
-      document.getElementById('resumeBanner').classList.add('visible');
-    }
-
-    function clearResume() {
-      resumeContext = null;
-      resumeFileName = null;
-      document.getElementById('resumeBanner').classList.remove('visible');
-      showToast('Resume removed.');
-    }
 
     // ── MARKDOWN RENDERER ──────────────────────────
     function renderMarkdown(text) {
@@ -1894,53 +1939,102 @@
       const text = input.value.trim();
       if (!text) return;
 
-      // Intent-Gated Location Trigger (30-Minute TTL Check)
-      if (isNearbyQuery(text)) {
+      const nearbyIntent = isNearbyQuery(text);
+      console.log("[NearbyDebug] text:", text);
+      console.log("[NearbyDebug] nearbyIntent:", nearbyIntent);
+
+      // Nearby searches must obtain browser GPS before /chat. Do not fall back to nationwide search.
+      if (nearbyIntent) {
+        console.log("Nearby search detected");
         let needFreshLocation = true;
         try {
           const cachedLocStr = sessionStorage.getItem('cc_user_location_obj');
           if (cachedLocStr) {
             const cachedObj = JSON.parse(cachedLocStr);
             const ageMs = Date.now() - new Date(cachedObj.captured_at).getTime();
-            if (ageMs < 30 * 60 * 1000) {  // 30 Minutes TTL
+            if (hasValidCoords(cachedObj) && Number.isFinite(ageMs) && ageMs < 30 * 60 * 1000) {
               needFreshLocation = false;
               userLocationObj = cachedObj;
-              userLocation = cachedObj.city;
-              console.log("[LocationCache] Reusing fresh location snapshot (Age < 30m):", cachedObj.city);
+              userCoords = { latitude: Number(cachedObj.latitude), longitude: Number(cachedObj.longitude) };
+              userLocation = cachedObj.city || userLocation;
+              console.log("[LocationCache] Reusing coordinates from session snapshot (Age < 30m)");
+              console.log("[NearbyDebug] using cached coordinates", userCoords);
             }
           }
         } catch (e) {}
 
         if (needFreshLocation) {
+          console.log("[NearbyDebug] Requesting browser geolocation");
           showToast('📍 Requesting location permission...', '#00C2A8');
-          const coordsResult = await getUserCoordinates();
-          if (coordsResult && !coordsResult.error) {
-            userCoords = coordsResult;
-            const geocodeRes = await reverseGeocodeCoords(coordsResult.latitude, coordsResult.longitude);
-            const cityName = typeof geocodeRes === 'object' && geocodeRes ? geocodeRes.city : (typeof geocodeRes === 'string' ? geocodeRes : null);
-            const stateName = typeof geocodeRes === 'object' && geocodeRes ? geocodeRes.state : null;
+          let coordsResult = await getUserCoordinates();
+          
+          if (!coordsResult || coordsResult.error || !hasValidCoords(coordsResult)) {
+            console.warn("[NearbyDebug] GPS failed (" + (coordsResult && coordsResult.error) + "), attempting IP location fallback...");
+            const ipLoc = await getIPLocationFallback();
+            if (ipLoc && (hasValidCoords(ipLoc) || ipLoc.city)) {
+              coordsResult = ipLoc;
+            }
+          }
 
+          if (coordsResult && hasValidCoords(coordsResult)) {
+            console.log("Latitude:", coordsResult.latitude);
+            console.log("Longitude:", coordsResult.longitude);
+            userCoords = { latitude: coordsResult.latitude, longitude: coordsResult.longitude };
+            let cityName = coordsResult.city;
+            let stateName = coordsResult.state;
+            if (!cityName) {
+              const geocodeRes = await reverseGeocodeCoords(coordsResult.latitude, coordsResult.longitude);
+              cityName = typeof geocodeRes === 'object' && geocodeRes ? geocodeRes.city : (typeof geocodeRes === 'string' ? geocodeRes : null);
+              stateName = typeof geocodeRes === 'object' && geocodeRes ? geocodeRes.state : stateName;
+            }
+
+            userLocationObj = {
+              source: "CURRENT",
+              latitude: coordsResult.latitude,
+              longitude: coordsResult.longitude,
+              city: cityName || undefined,
+              state: stateName || undefined,
+              captured_at: new Date().toISOString()
+            };
             if (cityName) {
-              userLocationObj = {
-                source: "CURRENT",
-                latitude: coordsResult.latitude,
-                longitude: coordsResult.longitude,
-                city: cityName,
-                state: stateName,
-                captured_at: new Date().toISOString()
-              };
               userLocation = cityName;
-              sessionStorage.setItem('cc_user_location_obj', JSON.stringify(userLocationObj));
               sessionStorage.setItem('cc_user_location', userLocation);
               showToast(`📍 Location acquired: ${userLocation}`, '#00C2A8');
             } else {
-              showToast('⚠️ Could not resolve city name from GPS. Please specify city.', '#e05252');
+              showToast('📍 Location coordinates acquired', '#00C2A8');
             }
-          } else if (coordsResult && coordsResult.error === "DENIED") {
-            showToast('⚠️ Location permission denied. Please allow access or specify a city.', '#e05252');
+            sessionStorage.setItem('cc_user_location_obj', JSON.stringify(userLocationObj));
           } else {
-            showToast('⚠️ GPS unavailable. Please specify a city.', '#e05252');
+            const fallbackCity = userLocation || (coordsResult && coordsResult.city) || (currentUserDetail && (currentUserDetail.city || currentUserDetail.location || currentUserDetail.state));
+            if (fallbackCity) {
+              userLocationObj = {
+                source: "CURRENT",
+                city: fallbackCity,
+                captured_at: new Date().toISOString()
+              };
+              userLocation = fallbackCity;
+              sessionStorage.setItem('cc_user_location', userLocation);
+              sessionStorage.setItem('cc_user_location_obj', JSON.stringify(userLocationObj));
+              showToast(`📍 Using location: ${fallbackCity}`, '#00C2A8');
+            } else {
+              hideHero();
+              addUserMessage(text);
+              input.value = '';
+              input.style.height = 'auto';
+              addBotMessage(nearbyLocationErrorMessage((coordsResult && coordsResult.error) || "DENIED"));
+              return;
+            }
           }
+        }
+
+        const hasLocationData = hasValidCoords(userCoords) || hasValidCoords(userLocationObj) || (userLocationObj && userLocationObj.city) || userLocation;
+        if (!hasLocationData) {
+          hideHero();
+          addUserMessage(text);
+          input.value = '';
+          input.style.height = 'auto';
+          addBotMessage(nearbyLocationErrorMessage("FAILED"));
+          return;
         }
       }
 
@@ -1961,14 +2055,31 @@
       }
 
       try {
+        const nearbyLat = nearbyIntent ? Number((userCoords && userCoords.latitude) ?? (userLocationObj && userLocationObj.latitude)) : undefined;
+        const nearbyLon = nearbyIntent ? Number((userCoords && userCoords.longitude) ?? (userLocationObj && userLocationObj.longitude)) : undefined;
+        const hasNearbyCoords = nearbyIntent && Number.isFinite(nearbyLat) && Number.isFinite(nearbyLon);
+
         const body = {
           session_id: currentSessionId,
           messages: conversationHistory,
-          resume_context: resumeContext || undefined,
           user_location: userLocationObj || userLocation || undefined,
           user_detail: currentUserDetail || undefined,
           widgets_data: currentWidgetsData || undefined
         };
+
+        if (hasNearbyCoords) {
+          body.latitude = nearbyLat;
+          body.longitude = nearbyLon;
+          console.log("Sending /chat request with coordinates");
+        }
+
+        console.log("[NearbyDebug] nearbyIntent:", nearbyIntent);
+        console.log("[NearbyDebug] userCoords:", userCoords);
+        console.log("[NearbyDebug] userLocationObj:", userLocationObj);
+        console.log("[NearbyDebug] nearbyLat:", nearbyLat);
+        console.log("[NearbyDebug] nearbyLon:", nearbyLon);
+        console.log("[NearbyDebug] /chat payload lat/lng:", body.latitude, body.longitude);
+
 
         const headers = {
           'Content-Type': 'application/json',
@@ -2000,11 +2111,28 @@
         conversationHistory.push({ role: 'assistant', content: reply });
         
         let html = renderMarkdown(reply);
-        const results = data.results || data.jobs || data.candidates;
+        const results = data.results || data.jobs || data.candidates || data.people;
         if (results && results.length > 0) {
           const containerId = 'job_container_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
-          html += renderCardsHtml(results, data.result_type || (data.jobs ? 'jobs' : 'candidates'), data.pagination, containerId);
+          const inferredType = data.result_type || (data.candidates || data.people ? 'candidates' : (data.jobs ? 'jobs' : 'candidates'));
+          html += renderCardsHtml(results, inferredType, data.pagination, containerId);
         }
+
+        /*
+        const suggestionChips = data.suggestion_chips;
+        if (Array.isArray(suggestionChips) && suggestionChips.length > 0) {
+          html += '<div class="suggestion-chips-container">';
+          suggestionChips.forEach(chipText => {
+            if (chipText && String(chipText).trim()) {
+              const cleanText = String(chipText).trim();
+              const safeAttr = escapeHtml(cleanText).replace(/'/g, "&#39;");
+              html += `<button type="button" class="suggestion-chip" onclick="askChip('${safeAttr}')">${escapeHtml(cleanText)}</button>`;
+            }
+          });
+          html += '</div>';
+        }
+        */
+
         addBotMessage(html);
 
       } catch (err) {
@@ -2019,10 +2147,12 @@
       document.getElementById('msgInput').focus();
     }
 
+    /*
     function askChip(text) {
       document.getElementById('msgInput').value = text;
       sendMessage();
     }
+    */
 
     function clearChat() {
       conversationHistory = [];
@@ -2033,8 +2163,8 @@
       });
       const hero = document.getElementById('heroSection');
       if (hero) hero.style.display = '';
-      clearResume();
     }
+
 
     function changeClientJobPage(delta, containerId) {
       const store = clientJobPaginationStore[containerId];
@@ -2056,10 +2186,11 @@
       const endIdx = Math.min(startIdx + store.pageSize, store.jobs.length);
       const pageJobs = store.jobs.slice(startIdx, endIdx);
 
+      const headerTitle = (store.resultType === 'candidates' || store.resultType === 'people') ? 'Matching Professionals' : 'Recommended Jobs';
       let html = '';
       html += `
         <div class="job-results-header" style="margin-top: 10px; margin-bottom: 6px; font-weight: 600; font-size: 13px; color: #00C2A8; display: flex; justify-content: space-between; align-items: center;">
-          <span>Recommended Jobs</span>
+          <span>${headerTitle}</span>
           <span style="font-size: 12px; color: #565869; font-weight: 400;">Showing ${startIdx + 1}–${endIdx} of ${store.totalResults}</span>
         </div>
       `;
@@ -2160,7 +2291,7 @@
             </div>
           </div>
         `;
-      } else if (resultType === 'jobs' || resultType === 'urgent_jobs' || item.job_id || item.title) {
+      } else if (resultType === 'jobs' || resultType === 'urgent_jobs' || item.job_id) {
         const title = item.title || item.job_title || 'Job';
         const company = item.company || item.company_name || '';
         const department = item.department || item.department_name || '';
@@ -2206,20 +2337,36 @@
           </div>
         `;
       } else {
-        // Candidate card
-        const name = (item.name && item.name.trim()) ? item.name.trim() : 'Candidate';
-        const pos = (item.position && item.position.trim()) || (item.headline && item.headline.trim()) || 'Candidate';
-        const loc = [item.city, item.state].filter(Boolean).join(', ') || item.location || '';
-        const exp = item.experience_label || item.experience || '';
-        const skills = Array.isArray(item.skills) ? item.skills.filter(Boolean).slice(0, 4).join(', ') : '';
+        // Candidate / People card
+        const name = (item.name && item.name.trim()) ? item.name.trim() : 'Professional';
+        const rawCompany = (item.company || item.current_company_name || '').trim();
+        const displayCompany = (rawCompany && rawCompany.toLowerCase() !== 'not specified' && rawCompany.toLowerCase() !== 'unknown') ? rawCompany : '';
+        const pos = (displayCompany ? `${item.current_designation || item.position || item.headline || 'Professional'} at ${displayCompany}` : (item.current_designation || item.position || item.headline || 'Professional'));
+        const locParts = [item.city, item.state, item.country].filter(Boolean);
+        const loc = locParts.length > 0 ? locParts.join(', ') : (item.location || '');
+        const exp = item.experience_label || (item.experience ? `${item.experience} yrs` : '');
+        const skillsList = Array.isArray(item.skills) ? item.skills.filter(Boolean) : (typeof item.skills === 'string' ? item.skills.split(',').map(s => s.trim()).filter(Boolean) : []);
+        const skills = skillsList.length > 0 ? skillsList.slice(0, 5).join(', ') : '';
         const url = item.url || '#';
         const matchReason = item.match_reason || '';
 
+        const rawId = item.cc_id || item.candidate_id || item.id || '';
+        const ccId = rawId ? (String(rawId).startsWith('CC-') ? rawId : `CC-${rawId}`) : '';
+
         return `
           <div class="job-card candidate-card">
+            ${displayCompany ? `
+              <div class="candidate-company-header">
+                <div class="company-header-left">
+                  <span class="company-icon">🏢</span>
+                  <span class="company-name" title="${escapeHtml(displayCompany)}">${escapeHtml(displayCompany)}</span>
+                </div>
+                <span class="company-label">CURRENT COMPANY</span>
+              </div>
+            ` : ''}
             <div class="card-header">
               <div>
-                <h4 class="card-title">${escapeHtml(name)}</h4>
+                <h4 class="card-title">${escapeHtml(name)} ${ccId ? `<span style="font-size: 11px; color: var(--cc-teal); background: rgba(0,194,168,0.1); padding: 2px 6px; border-radius: 4px; font-weight: 600; margin-left: 6px;">ID: ${escapeHtml(ccId)}</span>` : ''}</h4>
                 <p class="card-subtitle">${escapeHtml(pos)}</p>
               </div>
               ${exp ? `<span class="badge badge-navy">${escapeHtml(exp)}</span>` : ''}
@@ -2242,17 +2389,19 @@
 
       const containerId = customContainerId || ('job_container_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7));
 
-      const isPaginated = pagination && Array.isArray(pagination.ranked_jobs) && pagination.ranked_jobs.length > 0;
-      
-      if (isPaginated) {
+      const allJobs = (pagination && Array.isArray(pagination.ranked_jobs) && pagination.ranked_jobs.length > 0)
+        ? pagination.ranked_jobs
+        : (Array.isArray(results) && results.length > 0 ? results : null);
+
+      if (allJobs && allJobs.length > 0) {
         clientJobPaginationStore[containerId] = {
-          searchId: pagination.search_id || '',
-          queryFingerprint: pagination.query_fingerprint || '',
-          jobs: pagination.ranked_jobs,
-          currentPage: pagination.current_page || 1,
-          pageSize: pagination.page_size || pagination.per_page || 5,
-          totalPages: pagination.total_pages || Math.ceil(pagination.ranked_jobs.length / 5),
-          totalResults: pagination.total_results || pagination.ranked_jobs.length,
+          searchId: (pagination && pagination.search_id) || '',
+          queryFingerprint: (pagination && pagination.query_fingerprint) || '',
+          jobs: allJobs,
+          currentPage: (pagination && pagination.current_page) || 1,
+          pageSize: (pagination && (pagination.page_size || pagination.per_page)) || 5,
+          totalPages: (pagination && pagination.total_pages) || Math.ceil(allJobs.length / 5),
+          totalResults: (pagination && pagination.total_results) || allJobs.length,
           resultType: resultType
         };
       }
@@ -2267,7 +2416,7 @@
       const totalRes = store ? store.totalResults : (pagination ? pagination.total_results : results.length);
       const startIdx = store ? ((store.currentPage - 1) * store.pageSize + 1) : (pagination ? pagination.start_index : 1);
       const endIdx = store ? Math.min(store.currentPage * store.pageSize, store.totalResults) : (pagination ? pagination.end_index : results.length);
-      const headerTitle = resultType === 'candidates' ? 'Matching Candidates' : 'Recommended Jobs';
+      const headerTitle = (resultType === 'candidates' || resultType === 'people') ? 'Matching Professionals' : 'Recommended Jobs';
 
       if (totalRes > 0) {
         html += `

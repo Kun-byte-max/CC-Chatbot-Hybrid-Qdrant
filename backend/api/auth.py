@@ -25,20 +25,15 @@ def find_user_by_token(token: str) -> Optional[dict]:
     role = None
     uid = None
 
-    # 1. Try local JWT secret decode
+    # 1. Try local JWT secret decode with signature verification
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         email = payload.get("email")
         role = payload.get("role")
         uid = payload.get("uid") or payload.get("id")
     except Exception:
-        # 2. Try unverified decode for platform JWT tokens
-        try:
-            payload = jwt.decode(token, options={"verify_signature": False})
-            email = payload.get("email")
-            uid = payload.get("uid") or payload.get("id")
-        except Exception:
-            pass
+        # Signature invalid, expired, or malformed -> do not fall back to unverified decode
+        pass
 
     conn = get_db()
     c = conn.cursor()
@@ -110,18 +105,18 @@ async def verify_token(req: Request, credentials: Optional[HTTPAuthorizationCred
             role = "employee" if user.get("user_type") == 1 else "employer"
             payload = {"email": email, "role": role, "uid": user.get("id")}
         else:
-            try:
-                payload = jwt.decode(token, options={"verify_signature": False})
-                email = payload.get("email")
-                role = payload.get("role", "employee")
-            except Exception:
-                raise HTTPException(status_code=401, detail="Invalid or expired token.")
+            raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
     if not email:
         raise HTTPException(status_code=401, detail="Invalid token payload.")
 
+    # Derive authenticated user identifier (prefer uid/id or email)
+    authenticated_user_id = str(payload.get("uid") or payload.get("id") or email).strip()
+
     req.state.email = email
     req.state.role = role
+    req.state.user_id = authenticated_user_id
+    req.state.jwt_payload = payload
     request_role.set(role)
     request_email.set(email)
     return payload
@@ -138,8 +133,7 @@ async def login(request: LoginRequest):
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-    # Fetch user data from DB
-    user_type = 1 if role == "employee" else 2
+    # Fetch user data from DB by email first to auto-detect user_type from DB
     user_data = None
     try:
         conn = get_db()
@@ -153,13 +147,21 @@ async def login(request: LoginRequest):
             FROM cyb_user u
             LEFT JOIN cyb_cities c ON u.city = c.id
             LEFT JOIN cyb_state s ON u.state = s.id
-            WHERE LOWER(u.email) = %s AND u.user_type = %s AND u.status = 1 AND (u.is_deleted IS NULL OR u.is_deleted = 0)
+            WHERE LOWER(u.email) = %s AND u.status = 1 AND (u.is_deleted IS NULL OR u.is_deleted = 0)
             LIMIT 1
             """,
-            (request.email.lower().strip(), user_type)
+            (request.email.lower().strip(),)
         )
         row = c.fetchone()
         if row:
+            # Respect user_type in database: 2 = employer, 1 = employee
+            user_type = row["user_type"]
+            role = "employer" if user_type == 2 else "employee"
+            payload = {
+                "email": request.email.lower().strip(),
+                "role": role
+            }
+            token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
             if row.get("token") and len(str(row["token"]).strip()) > 20 and str(row["token"]).lower() != "none":
                 token = str(row["token"]).strip()
             user_data = {
@@ -177,6 +179,8 @@ async def login(request: LoginRequest):
                 "state_name": row["state_name"],
                 "country": row["country"]
             }
+        else:
+            user_type = 1 if role == "employee" else 2
         conn.close()
     except Exception as e:
         print(f"Database error while querying user details on login: {e}")

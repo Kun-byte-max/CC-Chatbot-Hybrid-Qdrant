@@ -1,6 +1,0 @@
-=== DESIGNATION MIGRATION REPORT ===
-
-Designations Processed: 13251
-Unique Canonical Designations: 0
-Designation Aliases: 0
-Manual Reviews Flagged Designations: 671

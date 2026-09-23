@@ -149,3 +149,61 @@ class SalaryMatcher:
             else None
         )
         return self._match_salaries(cand_sal, job_sal)
+
+    def match_employer_salary(
+        self,
+        employer_budget: Optional[Any] = None,
+        candidate_salary: Optional[Any] = None,
+    ) -> Any:
+        """
+        Domain-safe salary matcher entry point for Phase 2 Employer Candidate Recommendation.
+        Evaluates soft budget match with explicit salary missing, zero budget, and NULL candidate salary protections.
+        """
+        from backend.recommendation.types import MatchStatus, MatchResult, RecommendationDimension
+
+        norm_budget = self._normalize_salary(employer_budget)
+        if norm_budget is None or norm_budget <= 0.0:
+            return MatchResult(
+                dimension=RecommendationDimension.SALARY,
+                status=MatchStatus.NOT_REQUESTED,
+                score=None,
+                details={"reason": "No employer budget requested or budget <= 0."},
+            )
+
+        norm_cand = self._normalize_salary(candidate_salary)
+        if norm_cand is None or norm_cand <= 0.0:
+            return MatchResult(
+                dimension=RecommendationDimension.SALARY,
+                status=MatchStatus.UNKNOWN,
+                score=None,
+                details={"reason": "Candidate profile has no populated or valid expected salary data."},
+            )
+
+        if norm_cand <= norm_budget:
+            return MatchResult(
+                dimension=RecommendationDimension.SALARY,
+                status=MatchStatus.MATCH,
+                score=100.0,
+                details={
+                    "reason": "Candidate expected salary meets or comes within employer budget.",
+                    "normalized_budget": norm_budget,
+                    "normalized_candidate_salary": norm_cand,
+                },
+            )
+
+        over_pct = ((norm_cand - norm_budget) / norm_budget) * 100.0
+        score = max(0.0, round(100.0 - over_pct, 2))
+        status = MatchStatus.MATCH if score >= 70.0 else MatchStatus.MISMATCH
+
+        return MatchResult(
+            dimension=RecommendationDimension.SALARY,
+            status=status,
+            score=score,
+            details={
+                "reason": f"Candidate expected salary exceeds budget by {round(over_pct, 2)}%.",
+                "normalized_budget": norm_budget,
+                "normalized_candidate_salary": norm_cand,
+                "over_budget_percent": round(over_pct, 2),
+            },
+        )
+

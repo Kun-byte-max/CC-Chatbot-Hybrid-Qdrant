@@ -19,7 +19,8 @@ class TimingContext:
         self.compose_completion_tokens: int = -1
         self.profile_parse_ran: bool = False
         self.search_parse_ran: bool = False
-        self.profile_found: bool = False
+        self.profile_update_intent_found: bool = False
+        self.profile_retrieved: bool = False
         self.search_query_found: bool = False
         self.search_executed: bool = False
         self.history_messages_sent: int = 0
@@ -122,12 +123,22 @@ def set_gate_flags(profile_parse_ran: Optional[bool] = None, search_parse_ran: O
     except Exception:
         pass
 
-def set_decision_flags(profile_found: Optional[bool] = None, search_query_found: Optional[bool] = None, search_executed: Optional[bool] = None) -> None:
+def set_decision_flags(
+    profile_update_intent_found: Optional[bool] = None,
+    profile_retrieved: Optional[bool] = None,
+    search_query_found: Optional[bool] = None,
+    search_executed: Optional[bool] = None,
+    profile_found: Optional[bool] = None  # Backwards compatibility alias for profile_update_intent_found
+) -> None:
     try:
         ctx = get_request_timing()
         if ctx is not None:
-            if profile_found is not None:
-                ctx.profile_found = profile_found
+            if profile_update_intent_found is not None:
+                ctx.profile_update_intent_found = profile_update_intent_found
+            elif profile_found is not None:
+                ctx.profile_update_intent_found = profile_found
+            if profile_retrieved is not None:
+                ctx.profile_retrieved = profile_retrieved
             if search_query_found is not None:
                 ctx.search_query_found = search_query_found
             if search_executed is not None:

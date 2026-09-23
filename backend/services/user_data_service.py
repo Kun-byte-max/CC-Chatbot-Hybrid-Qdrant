@@ -100,6 +100,40 @@ def _get_user_db_fallback(token: Optional[str] = None, user_id: Optional[str] = 
     return user_row
 
 
+def _get_user_skills_db_fallback(user_db_id: Optional[Any]) -> List[Dict[str, str]]:
+    """
+    Retrieves active user skills from MySQL database (cyb_user_skill JOIN cyb_skill).
+    Returns list of dict objects matching API format: [{'skill': 'Python'}, ...]
+    """
+    if not user_db_id:
+        return []
+    try:
+        from backend.repositories.db import get_db
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT s.name
+            FROM cyb_user_skill us
+            JOIN cyb_skill s ON us.skill = s.id
+            WHERE us.user = %s AND us.status = 1 AND (us.is_deleted IS NULL OR us.is_deleted = 0)
+            """,
+            (str(user_db_id),)
+        )
+        rows = c.fetchall()
+        conn.close()
+        skills = []
+        for r in rows:
+            skill_name = (r.get("name") if isinstance(r, dict) else (r[0] if isinstance(r, (list, tuple)) else None)) or ""
+            if skill_name and str(skill_name).strip():
+                skills.append({"skill": str(skill_name).strip()})
+        return skills
+    except Exception as ex:
+        log.warning("Failed to fetch user skills from DB fallback for user_id=%s: %s", user_db_id, ex)
+        return []
+
+
+
 def _get_random_widgets_fallback() -> Dict[str, Any]:
     jobs = []
     try:
@@ -156,11 +190,10 @@ def fetch_endpoint_data(
     Includes dynamic slug resolution and database fallback for all users.
     """
     if endpoint_key == "user-detail":
+        user_row = _get_user_db_fallback(token, user_id)
+        if user_row:
+            return {"status": True, "message": "User Detail (DB Local)", "data": user_row}
         res = platform_api._get("employee/user-detail", token=token, user_id=user_id)
-        if not (isinstance(res, dict) and res.get("status")):
-            user_row = _get_user_db_fallback(token, user_id)
-            if user_row:
-                return {"status": True, "message": "User Detail (DB Fallback)", "data": user_row}
         return res
 
     elif endpoint_key == "allEmployementNew":
@@ -177,18 +210,21 @@ def fetch_endpoint_data(
 
     elif endpoint_key == "user-profile":
         slug = user_slug
+        if not slug:
+            # Check local DB fallback first for slug resolution to avoid unnecessary 401 calls on user-detail
+            user_row = _get_user_db_fallback(token, user_id)
+            if user_row and user_row.get("slug"):
+                slug = user_row.get("slug")
+                log.info("[PROFILE] using_local_slug_fallback=true slug=%s", slug)
+
         if not slug and token:
             try:
+                log.info("[PROFILE] authentication_available=true primary_endpoint=employee/user-detail")
                 detail_resp = platform_api._get("employee/user-detail", token=token, user_id=user_id)
                 if isinstance(detail_resp, dict) and detail_resp.get("status"):
                     slug = detail_resp.get("data", {}).get("slug")
             except Exception as ex:
                 log.warning("Dynamic slug resolution failed: %s", ex)
-
-        if not slug:
-            user_row = _get_user_db_fallback(token, user_id)
-            if user_row and user_row.get("slug"):
-                slug = user_row.get("slug")
 
         if slug:
             res = platform_api._get(f"auth/user-profile/{slug}", token=token, user_id=user_id)
@@ -198,6 +234,9 @@ def fetch_endpoint_data(
         # DB fallback for user-profile if external call fails or returns 401
         user_row = _get_user_db_fallback(token, user_id)
         if user_row:
+            u_db_id = user_row.get("id") or user_id
+            db_skills = _get_user_skills_db_fallback(u_db_id)
+            skill_strings = [s["skill"] for s in db_skills if isinstance(s, dict) and s.get("skill")]
             return {
                 "status": True,
                 "message": "User Profile (DB Fallback)",
@@ -215,7 +254,9 @@ def fetch_endpoint_data(
                     "city_name": user_row.get("city_name"),
                     "state_name": user_row.get("state_name"),
                     "employement_history_new": [],
-                    "skill": []
+                    "skill": db_skills,
+                    "skills": skill_strings,
+                    "all_Skill": db_skills
                 }
             }
         return {"status": False, "message": "User profile unavailable", "data": None}

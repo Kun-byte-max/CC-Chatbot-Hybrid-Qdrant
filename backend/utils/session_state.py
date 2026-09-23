@@ -90,15 +90,33 @@ class PaginationState:
 # 2. Database Schema Initialization & Key Formatting
 # ============================================================================
 
-def make_composite_key(session_id: str, role: Optional[str] = None) -> str:
-    """Formats role-isolated composite primary key: f'{raw_session_id}:{role.lower()}'."""
+import uuid
+import secrets
+
+def generate_secure_session_id() -> str:
+    """Generates a cryptographically secure random session ID."""
+    return f"sess_{secrets.token_hex(16)}"
+
+
+def make_composite_key(session_id: str, role: Optional[str] = None, user_id: Optional[Union[str, int]] = None) -> str:
+    """Formats identity and role-isolated composite primary key: f'{user_id}:{raw_session_id}:{role.lower()}'."""
     if not session_id:
         return ""
+
+    parts = []
+    if user_id is not None and str(user_id).strip():
+        uid_str = str(user_id).strip()
+        if not session_id.startswith(f"{uid_str}:"):
+            parts.append(uid_str)
+
+    parts.append(session_id)
+
     if role:
         norm_role = str(role).strip().lower()
         if not session_id.lower().endswith(f":{norm_role}"):
-            return f"{session_id}:{norm_role}"
-    return session_id
+            parts.append(norm_role)
+
+    return ":".join(parts)
 
 
 def _ensure_session_table():
@@ -599,44 +617,28 @@ def save_session_state_cas(
 
     current_payload = dict(state_dict)
 
-    for attempt in range(max_retries):
-        current_l1 = _SESSION_STATES.get(key, {})
-        expected_version = current_l1.get("version_seq", 1)
-        next_version = expected_version + 1
+    # RAM-First Authoritative Update: Always update in-memory _SESSION_STATES first
+    current_l1 = _SESSION_STATES.get(key, {})
+    expected_version = current_l1.get("version_seq", 1)
+    next_version = expected_version + 1
 
-        write_payload = dict(current_payload)
-        write_payload["version_seq"] = next_version
-        write_payload["_last_active"] = time.time()
-        write_payload.pop("db_sync_pending", None)
+    write_payload = dict(current_payload)
+    write_payload["version_seq"] = next_version
+    write_payload["_last_active"] = time.time()
+    
+    # Authoritative L1 RAM state update
+    _SESSION_STATES[key] = write_payload
 
+    # Best-effort DB persistence (DB failure != Chatbot failure)
+    try:
         success = _db_save_session(key, write_payload, expected_version=expected_version)
-        if success:
-            _SESSION_STATES[key] = write_payload
-            return True
+        if not success:
+            _SESSION_STATES[key]["db_sync_pending"] = True
+    except Exception as e:
+        log.warning(f"Optional DB session persistence failed for key {key}: {e}")
+        _SESSION_STATES[key]["db_sync_pending"] = True
 
-        # CAS failure: Reload latest DB state to synchronize version sequence and re-merge
-        latest_db = None
-        try:
-            latest_db = _db_load_session(key)
-        except Exception:
-            latest_db = None
-
-        if latest_db:
-            _SESSION_STATES[key] = latest_db
-            if remerge_fn and callable(remerge_fn):
-                current_payload = remerge_fn(latest_db)
-            else:
-                merged_payload = dict(latest_db)
-                for k, v in current_payload.items():
-                    if k not in ["version_seq", "_last_active", "db_sync_pending"] and v is not None:
-                        merged_payload[k] = v
-                current_payload = merged_payload
-        else:
-            current_payload["db_sync_pending"] = True
-            _SESSION_STATES[key] = current_payload
-
-    log.warning(f"CAS write retries exhausted ({max_retries}) for session {key}. Graceful degradation.")
-    return False
+    return True
 
 
 def update_employer_session_cas(
@@ -961,12 +963,31 @@ def merge_employee_search_query(
     if current_turn_query.company:
         merged.company = current_turn_query.company
 
+    # 7. Explicit Filter Removal handling
+    clear_targets = getattr(current_turn_query, "clear_filters", None) or getattr(current_turn_query, "clear_targets", None)
+    if clear_targets:
+        if isinstance(clear_targets, str):
+            clear_targets = [clear_targets]
+        for target in clear_targets:
+            t_norm = str(target).strip().lower()
+            if t_norm in ("location", "city", "state"):
+                merged.location = None
+                merged.canonical_location = None
+                merged.location_mode = None
+            elif t_norm in ("work_mode", "job_mode", "mode", "remote", "onsite", "hybrid"):
+                merged.work_mode = None
+            elif t_norm in ("salary", "pay", "budget"):
+                merged.salary_min = None
+                merged.salary_max = None
+            elif t_norm in ("experience", "exp"):
+                merged.experience_level = None
+
     return merged
 
 
 def generate_query_fingerprint(employer_spec: Any) -> str:
     """
-    Generates a 32-character canonical query fingerprint derived from EmployerSearchSpec.
+    Generates a canonical query fingerprint derived from SHA-256 (truncating the 64-character hexadecimal digest to 32 characters as per existing session_state implementation).
     """
     if employer_spec is None:
         return hashlib.sha256(b"{}").hexdigest()[:32]

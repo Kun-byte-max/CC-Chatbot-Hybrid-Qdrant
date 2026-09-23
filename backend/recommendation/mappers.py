@@ -117,12 +117,23 @@ def to_candidate_profile(row: Dict[str, Any]) -> Any:
     return CandidateProfile.from_dict(row)
 
 
-def to_candidate_profile_from_api(doc: Dict[str, Any]) -> Any:
+def to_candidate_profile_from_api(
+    doc: Dict[str, Any],
+    user_id: Optional[int] = None,
+    fallback_skills: Optional[List[str]] = None
+) -> Any:
     try:
         from backend.recommendation.models import CandidateProfile
     except ModuleNotFoundError:
         from recommendation.models import CandidateProfile  # type: ignore
-    return CandidateProfile.from_dict(doc)
+
+    raw_doc = doc.get("data") if isinstance(doc, dict) and isinstance(doc.get("data"), dict) else doc
+    profile = CandidateProfile.from_dict(raw_doc)
+    if user_id and not profile.id:
+        profile.id = user_id
+    if fallback_skills and not profile.skills:
+        profile.skills = [str(s).strip() for s in fallback_skills if str(s).strip()]
+    return profile
 
 
 def to_job_profile(row: Dict[str, Any]) -> Any:

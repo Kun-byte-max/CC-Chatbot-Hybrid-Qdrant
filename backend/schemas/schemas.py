@@ -15,7 +15,7 @@ class ChatRequest(BaseModel):
     user_type: Optional[str] = "employee"
     session_id: Optional[str] = "default_session"
     user_id: Optional[str] = None
-    user_location: Optional[str] = None
+    user_location: Optional[Union[str, Dict[str, Any]]] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     user_detail: Optional[Dict[str, Any]] = None
@@ -100,6 +100,7 @@ class ChatResponse(BaseModel):
     candidates: Optional[List[CandidateCard]] = None
     result_total: Optional[int] = None
     pagination: Optional[Dict[str, Any]] = None
+    suggestion_chips: Optional[List[Any]] = None
 
 
 class ProfileUpdateRequest(BaseModel):

@@ -77,6 +77,36 @@ STATE_ALIASES: Dict[str, str] = {
     "mh": "maharashtra",
 }
 
+HINDI_LOCATION_ALIASES: Dict[str, str] = {
+    "दिल्ली": "Delhi",
+    "नई दिल्ली": "New Delhi",
+    "गुरुग्राम": "Gurugram",
+    "गुडगाँव": "Gurgaon",
+    "नोएडा": "Noida",
+    "मुंबई": "Mumbai",
+    "बॉम्बे": "Mumbai",
+    "पुणे": "Pune",
+    "बैंगलोर": "Bangalore",
+    "बेंगलुरु": "Bengaluru",
+    "हैदराबाद": "Hyderabad",
+    "कोलकाता": "Kolkata",
+    "चेन्नई": "Chennai",
+    "अहमदाबाद": "Ahmedabad",
+    "जयपुर": "Jaipur",
+    "लखनऊ": "Lucknow",
+    "चंडीगढ़": "Chandigarh",
+    "इंदौर": "Indore",
+    "उत्तर प्रदेश": "Uttar Pradesh",
+    "महाराष्ट्र": "Maharashtra",
+    "कर्नाटक": "Karnataka",
+    "तमिलनाडु": "Tamil Nadu",
+    "हरियाणा": "Haryana",
+    "पंजाब": "Punjab",
+    "राजस्थान": "Rajasthan",
+    "गुजरात": "Gujarat",
+    "पश्चिम बंगाल": "West Bengal",
+}
+
 
 def normalize_location_text(location_text: Optional[str]) -> Optional[str]:
     """
@@ -103,20 +133,10 @@ def normalize_location_text(location_text: Optional[str]) -> Optional[str]:
     return clean if clean else None
 
 
-def resolve_location_from_db(raw_location: Optional[str]) -> LocationResult:
+def _execute_db_location_passes(clean_loc: str, raw_location: Optional[str]) -> LocationResult:
     """
-    Resolves raw location text against database tables using a 5-pass architecture:
-    Pass 1: Exact State Match in cyb_state (State Precedence Rule for dual entries like 'Delhi')
-    Pass 2: Centralized Alias & Fuzzy Normalization
-    Pass 3: Exact State Match with Corrected Canonical Name
-    Pass 4: Exact City Match in cyb_cities
-    Pass 5: Substring Matches with Ambiguity Check (>1 matches marked ambiguous)
+    Executes standard 5-pass database resolution against cyb_state and cyb_cities.
     """
-    clean_loc = normalize_location_text(raw_location)
-    if not clean_loc:
-        log.info("[LOCATION_RESOLUTION] input=%s normalized=None match_type=none resolved=True", raw_location)
-        return LocationResult(resolved=True, location_type="none", raw_query=raw_location)
-
     conn = get_db()
     cursor = conn.cursor()
 
@@ -268,7 +288,6 @@ def resolve_location_from_db(raw_location: Optional[str]) -> LocationResult:
     finally:
         conn.close()
 
-    # Unresolved explicit location
     log.warning('[LOCATION_RESOLUTION] input="%s" normalized="%s" match_type="unresolved" | Search blocked', raw_location, clean_loc)
     return LocationResult(
         resolved=False,
@@ -279,4 +298,36 @@ def resolve_location_from_db(raw_location: Optional[str]) -> LocationResult:
         state_name=None,
         raw_query=raw_location,
     )
+
+
+def resolve_location_from_db(raw_location: Optional[str]) -> LocationResult:
+    """
+    Resolves raw location text against database tables using a 5-pass architecture,
+    with a guarded non-recursive secondary fallback for Hindi Devanagari location names.
+    """
+    clean_loc = normalize_location_text(raw_location)
+    if not clean_loc:
+        log.info("[LOCATION_RESOLUTION] input=%s normalized=None match_type=none resolved=True", raw_location)
+        return LocationResult(resolved=True, location_type="none", raw_query=raw_location)
+
+    # Primary 5-pass DB resolution
+    res = _execute_db_location_passes(clean_loc, raw_location)
+    if res.resolved and res.location_type != "unknown":
+        return res
+
+    # Secondary Hindi Alias Fallback (Guarded Non-Recursive)
+    raw_str = str(raw_location or "").strip()
+    has_devanagari = any('\u0900' <= char <= '\u097f' for char in raw_str)
+    if has_devanagari:
+        alias_target = HINDI_LOCATION_ALIASES.get(raw_str) or HINDI_LOCATION_ALIASES.get(clean_loc)
+        if alias_target:
+            clean_alias = normalize_location_text(alias_target)
+            if clean_alias:
+                log.info('[LOCATION_RESOLUTION] hindi_alias_match raw="%s" alias="%s"', raw_location, alias_target)
+                fallback_res = _execute_db_location_passes(clean_alias, raw_location)
+                if fallback_res.resolved and fallback_res.location_type != "unknown":
+                    return fallback_res
+
+    return res
+
 

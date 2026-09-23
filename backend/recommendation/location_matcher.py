@@ -190,3 +190,93 @@ class LocationMatcher:
             job_country=j_country,
             work_mode=mode,
         )
+
+    def match_employer_location(
+        self,
+        req_location: Optional[str] = None,
+        req_work_mode: Optional[str] = None,
+        candidate_city: Optional[str] = None,
+        candidate_state: Optional[str] = None,
+        candidate_country: Optional[str] = None,
+    ) -> Any:
+        """
+        Domain-safe location matcher entry point for Phase 2 Employer Candidate Recommendation.
+        Evaluates physical geographic proximity or Remote capability using 4-state MatchStatus taxonomy.
+        """
+        from backend.recommendation.types import MatchStatus, MatchResult, RecommendationDimension
+
+        norm_req_loc = self._normalize_text(req_location)
+        norm_req_mode = self._normalize_text(req_work_mode)
+
+        if not norm_req_loc and not norm_req_mode:
+            return MatchResult(
+                dimension=RecommendationDimension.LOCATION,
+                status=MatchStatus.NOT_REQUESTED,
+                score=None,
+                details={"reason": "No location or work mode criteria requested."},
+            )
+
+        if norm_req_mode == "remote" and not norm_req_loc:
+            return MatchResult(
+                dimension=RecommendationDimension.LOCATION,
+                status=MatchStatus.MATCH,
+                score=100.0,
+                details={"reason": "Remote work mode requested and candidate qualifies.", "match_level": "remote"},
+            )
+
+        cand_c = self._normalize_text(candidate_city)
+        cand_s = self._normalize_text(candidate_state)
+        cand_co = self._normalize_text(candidate_country)
+
+        if not cand_c and not cand_s and not cand_co:
+            return MatchResult(
+                dimension=RecommendationDimension.LOCATION,
+                status=MatchStatus.UNKNOWN,
+                score=None,
+                details={"reason": "Candidate profile contains no location data."},
+            )
+
+        if norm_req_loc:
+            # Check 1: Exact City Match (100.0)
+            if cand_c and (cand_c == norm_req_loc or norm_req_loc in cand_c or cand_c in norm_req_loc):
+                return MatchResult(
+                    dimension=RecommendationDimension.LOCATION,
+                    status=MatchStatus.MATCH,
+                    score=100.0,
+                    details={"reason": "Exact city match", "match_level": "city"},
+                )
+
+            # Check 2: State-Level Match (80.0)
+            if cand_s and (cand_s == norm_req_loc or norm_req_loc in cand_s or cand_s in norm_req_loc):
+                return MatchResult(
+                    dimension=RecommendationDimension.LOCATION,
+                    status=MatchStatus.MATCH,
+                    score=80.0,
+                    details={"reason": "State-level match", "match_level": "state"},
+                )
+
+            # Check 3: Country-Level Match (60.0)
+            if cand_co and (cand_co == norm_req_loc or norm_req_loc in cand_co or cand_co in norm_req_loc):
+                return MatchResult(
+
+                    dimension=RecommendationDimension.LOCATION,
+                    status=MatchStatus.MATCH,
+                    score=60.0,
+                    details={"reason": "Country-level match", "match_level": "country"},
+                )
+
+            # Check 4: Mismatch (0.0)
+            return MatchResult(
+                dimension=RecommendationDimension.LOCATION,
+                status=MatchStatus.MISMATCH,
+                score=0.0,
+                details={"reason": "Requested location does not match candidate location data.", "match_level": "mismatch"},
+            )
+
+        return MatchResult(
+            dimension=RecommendationDimension.LOCATION,
+            status=MatchStatus.MATCH,
+            score=100.0,
+            details={"reason": "Work mode requirements satisfied.", "match_level": "mode_match"},
+        )
+

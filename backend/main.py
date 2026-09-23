@@ -88,25 +88,36 @@ log = logging.getLogger(__name__)
 
 rank_candidates_for_job = RankingService.rank_candidates_for_job
 
+ALLOWED_PROFILE_COLUMNS = {
+    "fname": "fname",
+    "lname": "lname",
+    "phone": "phone",
+    "dob": "dob",
+    "gender": "gender",
+    "marital_status": "marital_status",
+    "total_experience": "total_experience",
+    "current_salary": "current_salary",
+    "expected_salary": "expected_salary",
+    "notice_period": "notice_period",
+    "city": "city",
+    "state": "state",
+    "country": "country",
+    "present_address": "present_address",
+    "permanent_address": "permanent_address",
+    "same_address": "same_address",
+    "profile_description": "profile_description"
+}
+
 app = FastAPI(title="CollarCheck AI Chatbot")
 
-origins = [
-    "*",
-    "null",
-    "http://localhost",
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-    "http://localhost:8000",
-    "http://localhost:8001",
-    "http://127.0.0.1:8000",
-    "http://127.0.0.1:8001",
-]
+cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080,http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://localhost:8001,http://127.0.0.1:8000,http://127.0.0.1:8001")
+origins = [o.strip() for o in cors_env.split(",") if o.strip() and o.strip() not in ("*", "null")]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -352,15 +363,16 @@ async def get_all_employment_new_endpoint(req: Request, _token_payload: dict = D
     if not user_token:
         raise HTTPException(status_code=401, detail="Authentication token required.")
 
-    admin_token = os.getenv("PLATFORM_ADMIN_TOKEN", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3ODU3Mzg3MTAsImV4cCI6MTc4ODMzMDcxMCwidWlkIjoiMTkifQ.HAmTqzCh8sdsONvQTKIdA7XLk5iYZRoUDrXP6_8zwgk")
+    auth_header = user_token if user_token.startswith("Bearer ") else f"Bearer {user_token}"
+    raw_token = user_token.replace("Bearer ", "").strip()
 
     headers = {
         "Accept": "application/json, text/plain, */*",
-        "Authorization": admin_token if admin_token.startswith("Bearer ") else f"Bearer {admin_token}",
-        "X-Auth-Token": admin_token.replace("Bearer ", ""),
-        "X-User-Id": "19",
+        "Authorization": auth_header,
+        "X-Auth-Token": raw_token,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
+
 
     target_url = "https://admin.collarcheck.com/wapi/employee/allEmployementNew"
 
@@ -454,8 +466,12 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
 
         # User Data Service Interception (Phase 5)
         auth_token = req.headers.get("Authorization") or req.headers.get("X-Auth-Token") or ""
-        u_id = str(getattr(req.state, "user_id", "")) or str(_token_payload.get("user_id") or _token_payload.get("sub") or "") if isinstance(_token_payload, dict) else ""
+        u_id = str(getattr(req.state, "user_id", "")) or str(_token_payload.get("uid") or _token_payload.get("id") or _token_payload.get("email") or "") if isinstance(_token_payload, dict) else ""
         u_slug = str(getattr(req.state, "user_slug", "")) or str(_token_payload.get("user_slug") or _token_payload.get("slug") or "") if isinstance(_token_payload, dict) else ""
+        
+        # Security Hardening: Enforce trusted JWT identity and role over client-supplied payload body
+        user_role = str(getattr(req.state, "role", "employee"))
+        request.user_id = u_id if u_id else request.user_id
 
         try:
             from backend.services import user_data_service
@@ -492,21 +508,46 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             log.warning("Profile context injection failed: %s", str(p_err))
 
         user_location = request.user_location
-        if not user_location and request.latitude is not None and request.longitude is not None:
-            geo_res = reverse_geocode(request.latitude, request.longitude)
-            if geo_res.get("location_str"):
-                user_location = geo_res["location_str"]
-
-        if request.resume_context:
-            system += f"\n\n## RESUME FROM USER\n{request.resume_context}"
+        req_lat = request.latitude
+        req_lon = request.longitude
+        log.info("[NearbyDebug] request latitude=%s longitude=%s user_location=%s", req_lat, req_lon, user_location)
+        if isinstance(user_location, dict):
+            user_location = dict(user_location)
+            if req_lat is not None and user_location.get("latitude") is None:
+                user_location["latitude"] = req_lat
+            if req_lon is not None and user_location.get("longitude") is None:
+                user_location["longitude"] = req_lon
+            gps_lat = user_location.get("latitude")
+            gps_lon = user_location.get("longitude")
+            if not user_location.get("city") and gps_lat is not None and gps_lon is not None:
+                geo_res = reverse_geocode(gps_lat, gps_lon)
+                if geo_res.get("city"):
+                    user_location["city"] = geo_res.get("city")
+                if geo_res.get("state") and not user_location.get("state"):
+                    user_location["state"] = geo_res.get("state")
+        elif req_lat is not None and req_lon is not None:
+            city_str = user_location.strip() if isinstance(user_location, str) and user_location.strip() else None
+            geo_res = reverse_geocode(req_lat, req_lon)
+            if not city_str and geo_res.get("city"):
+                city_str = geo_res.get("city")
+            elif not city_str and geo_res.get("location_str"):
+                city_str = geo_res["location_str"]
+            user_location = {
+                "source": "CURRENT",
+                "latitude": req_lat,
+                "longitude": req_lon,
+                "city": city_str,
+                "state": geo_res.get("state"),
+            }
 
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
+
         if last_user_msg:
-            user_role = req.state.role
+            user_role = getattr(req.state, "role", None) or (isinstance(_token_payload, dict) and _token_payload.get("role")) or "employee"
             role = user_role
             session_id = request.session_id or "default_session"
-            email = req.state.email
+            email = getattr(req.state, "email", None) or (isinstance(_token_payload, dict) and _token_payload.get("email")) or ""
 
             # Check for profile update intent and write updates to DB
             try:
@@ -529,7 +570,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
                         parsed_update = await parse_profile_update(last_user_msg, messages)
 
                 p_found = bool(parsed_update.get("is_profile_update_intent"))
-                set_decision_flags(profile_found=p_found)
+                set_decision_flags(profile_update_intent_found=p_found)
 
                 if p_found:
                     intent_hint = "profile"
@@ -635,12 +676,33 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
                                             db_updates["present_address"] = curr_p
                                             db_updates["permanent_address"] = curr_p
 
-                                set_clauses = [f"{k} = %s" for k in db_updates.keys()]
-                                params = list(db_updates.values())
-                                params.extend([email.lower().strip(), user_type])
-                                query = f"UPDATE cyb_user SET {', '.join(set_clauses)}, modify_date = NOW() WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)"
-                                c.execute(query, params)
-                                conn.commit()
+                                ALLOWED_PROFILE_COLUMNS = {
+                                    "fname": "fname",
+                                    "lname": "lname",
+                                    "phone": "phone",
+                                    "dob": "dob",
+                                    "gender": "gender",
+                                    "marital_status": "marital_status",
+                                    "total_experience": "total_experience",
+                                    "current_salary": "current_salary",
+                                    "expected_salary": "expected_salary",
+                                    "notice_period": "notice_period",
+                                    "city": "city",
+                                    "state": "state",
+                                    "country": "country",
+                                    "present_address": "present_address",
+                                    "permanent_address": "permanent_address",
+                                    "same_address": "same_address",
+                                    "profile_description": "profile_description"
+                                }
+                                valid_updates = {ALLOWED_PROFILE_COLUMNS[k]: v for k, v in db_updates.items() if k in ALLOWED_PROFILE_COLUMNS}
+                                if valid_updates:
+                                    set_clauses = [f"{col} = %s" for col in valid_updates.keys()]
+                                    params = list(valid_updates.values())
+                                    params.extend([email.lower().strip(), user_type])
+                                    query = f"UPDATE cyb_user SET {', '.join(set_clauses)}, modify_date = NOW() WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)"
+                                    c.execute(query, params)
+                                    conn.commit()
                             except Exception as e:
                                 conn.rollback()
                                 log.exception("Failed to update profile fields from chat")
@@ -1017,19 +1079,42 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             allowed_ids = set()
             raw_hits = []
 
-            # Role-gating logic:
-            if user_role == "employer":
-                if not check_employer_access(last_user_msg, session_id, is_career_query):
-                    raise HTTPException(status_code=403, detail="Employers are not authorized to access the job-search flow.")
-                search_dict = await handle_employer_context(last_user_msg, session_id, messages, user_location, compose_mode=compose_mode)
-            else:  # employee
-                if not check_employee_access(last_user_msg, session_id):
-                    raise HTTPException(status_code=403, detail="Employees are not authorized to access the employer flow.")
-                search_dict = await handle_employee_context(
-                    last_user_msg, 
-                    messages, 
-                    user_location=user_location, 
-                    user_skills=user_skills_list, 
+            # Phase 1 Role-Aware Intent Detection, Authorization & Router Dispatch:
+            try:
+                from backend.services.search_parser import parse_search_query
+                from backend.services.access_control import check_role_access
+                from backend.services.search_router import dispatch_search_target
+            except ModuleNotFoundError:
+                from services.search_parser import parse_search_query  # type: ignore
+                from services.access_control import check_role_access  # type: ignore
+                from services.search_router import dispatch_search_target  # type: ignore
+
+            # 1. Parse Search Target (LLM + Context Precedence Guardrails)
+            parsed_query = await parse_search_query(last_user_msg, user_role, messages, user_location=user_location)
+            target = parsed_query.get("search_target")
+
+            # 2. Authorization Check
+            auth_res = check_role_access(user_role, target)
+
+            if not auth_res.allowed:
+                boundary_msg = auth_res.boundary_message or "This action is restricted for your account role."
+                search_dict = {
+                    "db_context": f"## ROLE CAPABILITY RESTRICTION\n{boundary_msg}\n\n[INSTRUCTION]\nRespond in one polite sentence explaining: {boundary_msg}",
+                    "results": None,
+                    "result_type": "role_boundary_restriction",
+                    "explanation": boundary_msg,
+                    "allowed_ids": set(),
+                    "raw_hits": [],
+                }
+            else:
+                # 3. Router Dispatch
+                search_dict = await dispatch_search_target(
+                    target=target,
+                    role=user_role,
+                    last_user_msg=last_user_msg,
+                    messages=messages,
+                    user_location=user_location,
+                    user_skills=user_skills_list,
                     user_roles=user_roles_list,
                     compose_mode=compose_mode,
                     candidate_id=(db_user.get("individual_id") or db_user.get("id")) if db_user else None,
@@ -1072,8 +1157,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
 
                     if not db_user.get("profile"):
                         missing.append("Upload Profile Image (2%)")
-                    if not db_user.get("resume"):
-                        missing.append("Upload Resume (2%)")
+
                     if not user_skills_list:
                         missing.append("skills")
                     if not user_edu_list:
@@ -1218,7 +1302,16 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             if payload_messages and payload_messages[-1] not in bounded_messages:
                 bounded_messages.append(payload_messages[-1])
         else:
-            bounded_messages = payload_messages
+            bounded_messages = list(payload_messages)
+        # Filter out stale error assistant messages from history so LLM doesn't repeat past errors
+        clean_bounded_messages = []
+        for m in bounded_messages:
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                content_lower = str(m.get("content", "")).lower()
+                if "temporarily unavailable" in content_lower or "briefly unavailable" in content_lower:
+                    continue
+            clean_bounded_messages.append(m)
+        bounded_messages = clean_bounded_messages
 
         history_sent = len(bounded_messages)
         history_dropped = max(0, total_history_count - history_sent)
@@ -1263,6 +1356,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
         set_validation_flag(violated)
 
         pagination_meta_res = search_dict.get("pagination") if (search_dict and isinstance(search_dict, dict)) else None
+        chips_meta_res = search_dict.get("suggestion_chips") if (search_dict and isinstance(search_dict, dict)) else None
         return ChatResponse(
             reply=reply, 
             success=True, 
@@ -1272,6 +1366,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             jobs=results_payload if result_type_payload in ("jobs", "urgent_jobs") else None,
             candidates=results_payload if result_type_payload == "candidates" else None,
             pagination=pagination_meta_res,
+            suggestion_chips=chips_meta_res,
         )
 
     except HTTPException as e:
@@ -1289,7 +1384,8 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
         err_suffix = f" error_type={err_type}" if outcome == "error" and err_type else ""
         p_ran_str = str(timing.profile_parse_ran).lower()
         s_ran_str = str(timing.search_parse_ran).lower()
-        p_found_str = str(timing.profile_found).lower()
+        p_intent_found_str = str(timing.profile_update_intent_found).lower()
+        p_retrieved_str = str(timing.profile_retrieved).lower()
         sq_found_str = str(timing.search_query_found).lower()
         s_exec_str = str(timing.search_executed).lower()
         r_viol_str = str(timing.reply_validation_violated).lower()
@@ -1299,8 +1395,8 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             f"profile_parse_ran={p_ran_str} search_parse_ran={s_ran_str} "
             f"compose_prompt_tokens={timing.compose_prompt_tokens} "
             f"compose_completion_tokens={timing.compose_completion_tokens} "
-            f"profile_found={p_found_str} search_query_found={sq_found_str} "
-            f"search_executed={s_exec_str} "
+            f"profile_update_intent_found={p_intent_found_str} profile_retrieved={p_retrieved_str} "
+            f"search_query_found={sq_found_str} search_executed={s_exec_str} "
             f"history_messages_sent={timing.history_messages_sent} "
             f"history_messages_dropped={timing.history_messages_dropped} "
             f"reply_validation_violated={r_viol_str}"

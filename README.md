@@ -53,9 +53,6 @@ All operational credentials and configuration settings are defined in the [`.env
   * **Function:** Main AI Chatbot entry point. Processes incoming chat messages, checks safety guardrails, updates user profile fields (if update intent is detected), fetches user profile context, queries relevant candidates or jobs, calls OpenAI LLM, and returns formatted responses with UI result cards.
   * **Auth Required:** Bearer JWT (`verify_token`).
 
-* **`POST /parse-resume`**
-  * **Function:** Extracts structural profile details (education, skills, experience, contact info) from uploaded user resume text using LLM parsing.
-
 * **`POST /reverse-geocode`**
   * **Function:** Converts GPS coordinates (`latitude`, `longitude`) into a location string (City, State, Country).
 

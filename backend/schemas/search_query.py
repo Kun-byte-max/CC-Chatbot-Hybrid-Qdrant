@@ -48,8 +48,16 @@ class SortMode(str, Enum):
     LATEST = "LATEST"
 
 
+class SearchTarget(str, Enum):
+    JOBS = "JOBS"
+    PEOPLE_SEARCH = "PEOPLE_SEARCH"
+    CANDIDATE_SEARCH = "CANDIDATE_SEARCH"
+    UNKNOWN = "UNKNOWN"
+
+
 class SearchQuery(BaseModel):
     intent: ChatbotIntent = ChatbotIntent.JOB_SEARCH
+    search_target: SearchTarget = SearchTarget.JOBS
     search_mode: SearchMode = SearchMode.HYBRID
     profile_status: ProfileStatus = ProfileStatus.PROFILE_UNAVAILABLE
 
@@ -72,6 +80,7 @@ class SearchQuery(BaseModel):
 
     work_mode: Optional[str] = None
     company: Optional[str] = None
+    clear_filters: Optional[List[str]] = Field(default_factory=list)
 
     sort_by: SortMode = SortMode.RECOMMENDATION
 
@@ -95,6 +104,12 @@ class SearchQuery(BaseModel):
         }
         encoded = json.dumps(data, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:16]
+
+    def to_search_criteria(self):
+        """Converts SearchQuery to canonical SearchCriteria representation."""
+        from backend.schemas.search_criteria import SearchCriteria
+        return SearchCriteria.from_parsed_dict(self.model_dump())
+
 
 
 class SearchSnapshot(BaseModel):

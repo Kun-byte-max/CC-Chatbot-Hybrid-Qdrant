@@ -1,6 +1,0 @@
-=== COMPANY MIGRATION REPORT ===
-
-Companies Processed: 743
-Unique Canonical Companies: 0
-Company Aliases: 0
-Manual Reviews Flagged Companies: 25

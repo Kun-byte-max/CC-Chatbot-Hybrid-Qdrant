@@ -28,8 +28,22 @@ FORBIDDEN_KEYS = {
 
 
 def _is_safe_key(key: str) -> bool:
-    k_lower = key.lower()
+    if not isinstance(key, str):
+        return True
+    k_lower = key.lower().strip()
     return not any(forbidden in k_lower for forbidden in FORBIDDEN_KEYS)
+
+
+def scrub_sensitive_keys(obj: Any) -> Any:
+    """
+    Recursively scrubs forbidden sensitive keys across dictionaries, nested dictionaries,
+    lists, and lists containing dictionaries without mutating the input object in-place.
+    """
+    if isinstance(obj, dict):
+        return {k: scrub_sensitive_keys(v) for k, v in obj.items() if _is_safe_key(str(k))}
+    elif isinstance(obj, list):
+        return [scrub_sensitive_keys(item) for item in obj]
+    return obj
 
 
 # -----------------------------------------------------------------------
@@ -448,11 +462,4 @@ def extract_by_intent(intent: UserIntent, api_data: Dict[str, Any]) -> Dict[str,
         extracted = {}
 
     # Final Security Scrubbing Guard
-    def _scrub(obj):
-        if isinstance(obj, dict):
-            return {k: _scrub(v) for k, v in obj.items() if _is_safe_key(k)}
-        elif isinstance(obj, list):
-            return [_scrub(item) for item in obj]
-        return obj
-
-    return _scrub(extracted)
+    return scrub_sensitive_keys(extracted)

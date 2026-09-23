@@ -23,6 +23,66 @@ class CandidateProfile:
     current_title: Optional[str] = None
     raw_data: Dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'CandidateProfile':
+        if not isinstance(d, dict):
+            return cls(id=0)
+
+        cand_id = d.get("id") or d.get("user_id") or d.get("candidate_id") or 0
+        if isinstance(cand_id, str) and cand_id.isdigit():
+            cand_id = int(cand_id)
+        elif not isinstance(cand_id, int):
+            cand_id = 0
+
+        name = d.get("full_name") or d.get("name") or d.get("username") or "Candidate"
+
+        skills = []
+        raw_skills = d.get("skills") or d.get("skill_names") or d.get("exp_skills") or d.get("all_Skill")
+        if isinstance(raw_skills, list):
+            for s in raw_skills:
+                if isinstance(s, dict):
+                    val = s.get("skill") or s.get("name") or s.get("title")
+                    if val and str(val).strip():
+                        skills.append(str(val).strip())
+                elif str(s).strip():
+                    skills.append(str(s).strip())
+        elif isinstance(raw_skills, str):
+            skills = [s.strip() for s in raw_skills.split(",") if s.strip()]
+
+        exp_years = d.get("total_experience_years") or d.get("experience_years") or 0.0
+        try:
+            exp_years = float(exp_years)
+        except (ValueError, TypeError):
+            exp_years = 0.0
+
+        city = d.get("city_name") or d.get("city")
+        state = d.get("state_name") or d.get("state")
+        country = d.get("country_name") or d.get("country")
+        location = ", ".join([str(p) for p in [city, state, country] if p]) or None
+
+        current_title = d.get("current_position_name") or d.get("designation") or d.get("title")
+
+        exp_sal = None
+        if d.get("expected_salary") is not None:
+            try:
+                exp_sal = float(d["expected_salary"])
+            except (ValueError, TypeError):
+                exp_sal = None
+
+        return cls(
+            id=cand_id,
+            name=str(name),
+            skills=skills,
+            experience_years=exp_years,
+            location=location,
+            city=str(city) if city else None,
+            state=str(state) if state else None,
+            country=str(country) if country else None,
+            expected_salary=exp_sal,
+            current_title=str(current_title) if current_title else None,
+            raw_data=d
+        )
+
 
 @dataclass
 class JobProfile:
@@ -42,6 +102,68 @@ class JobProfile:
     offered_salary_min: Optional[float] = None
     offered_salary_max: Optional[float] = None
     raw_data: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'JobProfile':
+        if not isinstance(d, dict):
+            return cls(id=0)
+
+        j_id = d.get("id") or d.get("job_id") or 0
+        if isinstance(j_id, str) and j_id.isdigit():
+            j_id = int(j_id)
+        elif not isinstance(j_id, int):
+            j_id = 0
+
+        title = d.get("job_title") or d.get("title") or "Job Title"
+        company_name = d.get("company_name") or d.get("company")
+
+        req_skills = []
+        raw_skills = d.get("required_skills") or d.get("skills") or d.get("skill_names")
+        if isinstance(raw_skills, list):
+            req_skills = [str(s).strip() for s in raw_skills if str(s).strip()]
+        elif isinstance(raw_skills, str):
+            req_skills = [s.strip() for s in raw_skills.split(",") if s.strip()]
+
+        req_exp = d.get("required_experience_years") or d.get("min_experience_years") or d.get("experience_years") or 0.0
+        try:
+            req_exp = float(req_exp)
+        except (ValueError, TypeError):
+            req_exp = 0.0
+
+        city = d.get("city_name") or d.get("city")
+        state = d.get("state_name") or d.get("state")
+        country = d.get("country_name") or d.get("country")
+        location = d.get("location") or (", ".join([str(p) for p in [city, state, country] if p]) or None)
+
+        sal_min = None
+        if d.get("offered_salary_min") is not None:
+            try:
+                sal_min = float(d["offered_salary_min"])
+            except (ValueError, TypeError):
+                sal_min = None
+
+        sal_max = None
+        if d.get("offered_salary_max") is not None:
+            try:
+                sal_max = float(d["offered_salary_max"])
+            except (ValueError, TypeError):
+                sal_max = None
+
+        return cls(
+            id=j_id,
+            title=str(title),
+            company_name=str(company_name) if company_name else None,
+            required_skills=req_skills,
+            required_experience_years=req_exp,
+            location=location,
+            city=str(city) if city else None,
+            state=str(state) if state else None,
+            country=str(country) if country else None,
+            job_mode=int(d.get("job_mode", 1)),
+            offered_salary_min=sal_min,
+            offered_salary_max=sal_max,
+            raw_data=d
+        )
 
 
 @dataclass

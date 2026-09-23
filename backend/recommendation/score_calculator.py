@@ -3,8 +3,9 @@ score_calculator.py — Version 2 ScoreCalculator implementation.
 Combines component matchers into a final recommendation score with dynamic profile-aware weighting.
 """
 
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 from backend.recommendation.models import ScoreResult
+
 from backend.schemas.search_query import ProfileStatus, SearchMode
 
 
@@ -127,3 +128,84 @@ class ScoreCalculator:
             weight_salary=round(w_sal, 2),
             weight_title=round(w_title, 2),
         )
+
+    def calculate_employer_candidate_score(
+        self,
+        candidate_id: str,
+        match_results: Dict[Any, Any],
+        explanation: str = "",
+    ) -> Any:
+
+        """
+        Calculates weighted composite candidate score with dynamic renormalization,
+        zero-denominator protection, and confidence score calculation.
+        """
+        from backend.recommendation.types import (
+            MatchStatus,
+            RecommendationStatus,
+            RecommendationDimension,
+            EmployerCandidateRecommendationResult,
+        )
+
+        base_weights = {
+            RecommendationDimension.TITLE: 0.35,
+            RecommendationDimension.SKILL: 0.35,
+            RecommendationDimension.EXPERIENCE: 0.15,
+            RecommendationDimension.LOCATION: 0.15,
+            RecommendationDimension.SALARY: 0.10,
+        }
+
+        weighted_numerator = 0.0
+        applicable_denominator = 0.0
+        scored_criteria_count = 0
+        total_requested_criteria_count = 0
+        total_requested_weight = 0.0
+        evaluated_weight = 0.0
+
+        for dim, base_w in base_weights.items():
+            match_res = match_results.get(dim)
+            if not match_res or match_res.status == MatchStatus.NOT_REQUESTED:
+                continue
+
+            total_requested_criteria_count += 1
+            total_requested_weight += base_w
+
+            if match_res.status in (MatchStatus.MATCH, MatchStatus.MISMATCH) and match_res.score is not None:
+                evaluated_weight += base_w
+                weighted_numerator += float(match_res.score) * base_w
+                applicable_denominator += base_w
+                scored_criteria_count += 1
+            elif match_res.status == MatchStatus.UNKNOWN:
+                # Include requested UNKNOWN dimensions in denominator to avoid artificially inflating missing-data profiles
+                applicable_denominator += base_w
+
+        confidence_score = (
+            round(evaluated_weight / total_requested_weight, 4) if total_requested_weight > 0.0 else 0.0
+        )
+
+        if applicable_denominator == 0.0 or scored_criteria_count == 0:
+            return EmployerCandidateRecommendationResult(
+                candidate_id=str(candidate_id),
+                overall_status=RecommendationStatus.INSUFFICIENT_DATA,
+                final_score=None,
+                confidence_score=confidence_score,
+                match_results=match_results,
+                explanation=explanation or "Insufficient data to score candidate across requested criteria.",
+                scored_criteria_count=scored_criteria_count,
+                total_requested_criteria_count=total_requested_criteria_count,
+            )
+
+        final_score = round(weighted_numerator / applicable_denominator, 2)
+        final_score = max(0.0, min(100.0, final_score))
+
+        return EmployerCandidateRecommendationResult(
+            candidate_id=str(candidate_id),
+            overall_status=RecommendationStatus.CALCULATED,
+            final_score=final_score,
+            confidence_score=confidence_score,
+            match_results=match_results,
+            explanation=explanation,
+            scored_criteria_count=scored_criteria_count,
+            total_requested_criteria_count=total_requested_criteria_count,
+        )
+
