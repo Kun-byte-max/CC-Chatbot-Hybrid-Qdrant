@@ -103,12 +103,31 @@ class ScoreCalculator:
         salary_score = float(salary_result.score)
         title_score = float(title_result.score)
 
+        # Dynamic Renormalization: Exclude dimensions where data is missing (match_level == 'unknown' or score is default 50.0 without evidence)
+        active_weights = {
+            "skill": w_skill if getattr(skill_result, "match_level", "") != "unknown" else 0.0,
+            "experience": w_exp,
+            "title": w_title if getattr(title_result, "match_level", "") != "unknown" else 0.0,
+            "salary": w_sal if getattr(salary_result, "normalized_candidate_salary", None) is not None or getattr(salary_result, "normalized_job_salary", None) is not None else 0.0,
+            "location": w_loc if getattr(location_result, "match_level", "") != "unknown" else 0.0,
+        }
+
+        total_weight = sum(active_weights.values())
+        if total_weight > 0:
+            norm_w_skill = active_weights["skill"] / total_weight
+            norm_w_exp = active_weights["experience"] / total_weight
+            norm_w_title = active_weights["title"] / total_weight
+            norm_w_sal = active_weights["salary"] / total_weight
+            norm_w_loc = active_weights["location"] / total_weight
+        else:
+            norm_w_skill, norm_w_exp, norm_w_title, norm_w_sal, norm_w_loc = w_skill, w_exp, w_title, w_sal, w_loc
+
         raw_overall = (
-            (skill_score * w_skill)
-            + (experience_score * w_exp)
-            + (title_score * w_title)
-            + (salary_score * w_sal)
-            + (location_score * w_loc)
+            (skill_score * norm_w_skill)
+            + (experience_score * norm_w_exp)
+            + (title_score * norm_w_title)
+            + (salary_score * norm_w_sal)
+            + (location_score * norm_w_loc)
         )
 
         overall_score = round(raw_overall, 2)
@@ -122,11 +141,11 @@ class ScoreCalculator:
             location_score=round(location_score, 2),
             salary_score=round(salary_score, 2),
             title_score=round(title_score, 2),
-            weight_skill=round(w_skill, 2),
-            weight_experience=round(w_exp, 2),
-            weight_location=round(w_loc, 2),
-            weight_salary=round(w_sal, 2),
-            weight_title=round(w_title, 2),
+            weight_skill=round(norm_w_skill, 2),
+            weight_experience=round(norm_w_exp, 2),
+            weight_location=round(norm_w_loc, 2),
+            weight_salary=round(norm_w_sal, 2),
+            weight_title=round(norm_w_title, 2),
         )
 
     def calculate_employer_candidate_score(

@@ -98,7 +98,10 @@ class LocationResolver:
 
     @staticmethod
     def get_coordinates_for_city(city_name: Optional[str]) -> Optional[Tuple[float, float]]:
-        """Returns (lat, lon) tuple for known city names."""
+        """
+        Returns (lat, lon) tuple for city names.
+        Dynamically geocodes city coordinates via OpenStreetMap Nominatim API if missing from in-memory cache.
+        """
         if not city_name:
             return None
         clean = city_name.lower().strip()
@@ -107,6 +110,22 @@ class LocationResolver:
         canonical = CANONICAL_ALIASES.get(clean)
         if canonical and canonical in CITY_COORDINATES:
             return CITY_COORDINATES[canonical]
+
+        # Dynamic Geocoding lookup via HTTP API
+        try:
+            import httpx
+            url = "https://nominatim.openstreetmap.org/search"
+            headers = {"User-Agent": "CollarCheckChatbot/1.0"}
+            params = {"q": city_name, "format": "json", "limit": 1}
+            res = httpx.get(url, params=params, headers=headers, timeout=3.0)
+            if res.status_code == 200 and res.json():
+                item = res.json()[0]
+                coords = (float(item["lat"]), float(item["lon"]))
+                CITY_COORDINATES[clean] = coords
+                return coords
+        except Exception as e:
+            log.warning("Dynamic geocoding for city '%s' failed: %s", city_name, e)
+
         return None
 
     @classmethod

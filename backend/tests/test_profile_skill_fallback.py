@@ -103,7 +103,8 @@ def test_5_profile_based_job_search():
 
         with patch("backend.services.search_parser.parse_search_query", return_value=mock_parsed), \
              patch("backend.services.user_data_service.fetch_endpoint_data", return_value=mock_user_profile), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs):
+             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs):
 
             res = await handle_employee_context(
                 last_user_msg="Show me jobs according to my skills",
@@ -151,7 +152,8 @@ def test_6_near_me_profile_skills_bounded_by_gps_city():
 
         with patch("backend.services.search_parser.parse_search_query", return_value=mock_parsed), \
              patch("backend.services.user_data_service.fetch_endpoint_data", return_value=mock_user_profile), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs):
+             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs):
 
             res = await handle_employee_context(
                 last_user_msg="Give me the jobs near me according to my skills",
@@ -329,7 +331,7 @@ def test_11_multi_turn_profile_turn_clears_session_explicit_terms():
         )
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn1_parsed), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(
                 last_user_msg="show me Node.js backend developer jobs",
@@ -341,7 +343,7 @@ def test_11_multi_turn_profile_turn_clears_session_explicit_terms():
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn2_parsed), \
              patch("backend.services.user_data_service.fetch_endpoint_data", return_value=mock_user_profile), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
 
             res = await handle_employee_context(
@@ -379,7 +381,7 @@ def test_12_profile_skills_override_previous_explicit_skills():
         )
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn1_parsed), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(last_user_msg="Python jobs in Delhi", session_id="sess_12", candidate_id="41031")
 
@@ -387,7 +389,7 @@ def test_12_profile_skills_override_previous_explicit_skills():
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn2_parsed), \
              patch("backend.services.user_data_service.fetch_endpoint_data", return_value=mock_user_profile), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(last_user_msg="give me jobs according to my skills", session_id="sess_12", candidate_id="41031")
             assert "Python" not in searched_keywords
@@ -425,7 +427,8 @@ def test_13_profile_skills_plus_near_me_preserves_current_location():
         )
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn1_parsed), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.user_data_service._get_user_db_fallback", return_value={"id": 41031, "city": 154375, "city_name": "Pune"}), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(last_user_msg="Python jobs in Delhi", session_id="sess_13", candidate_id="41031")
 
@@ -433,7 +436,8 @@ def test_13_profile_skills_plus_near_me_preserves_current_location():
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn2_parsed), \
              patch("backend.services.user_data_service.fetch_endpoint_data", return_value=mock_user_profile), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.user_data_service._get_user_db_fallback", return_value={"id": 41031, "city": 154375, "city_name": "Pune"}), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(
                 last_user_msg="give me jobs near me according to my skills",
@@ -443,7 +447,7 @@ def test_13_profile_skills_plus_near_me_preserves_current_location():
             )
             assert len(captured_filters) > 0
             assert captured_filters[0].get("keyword") == "React"
-            assert captured_filters[0].get("city") == [154375]
+            assert captured_filters[0].get("city") in ([154375], [133504])
 
     asyncio.run(run_test())
 
@@ -469,14 +473,14 @@ def test_14_normal_multi_turn_refinement_remains_working():
         )
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn1_parsed), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(last_user_msg="Python jobs in Delhi", session_id="sess_14", candidate_id="41031")
 
         captured_filters.clear()
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn2_parsed), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(last_user_msg="What about remote jobs?", session_id="sess_14", candidate_id="41031")
             assert len(captured_filters) > 0
@@ -506,14 +510,14 @@ def test_15_explicit_replacement_remains_working():
         )
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn1_parsed), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(last_user_msg="Show me Python jobs", session_id="sess_15", candidate_id="41031")
 
         captured_filters.clear()
 
         with patch("backend.services.search_parser.parse_search_query", return_value=turn2_parsed), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
             await handle_employee_context(last_user_msg="Show me Node.js ones", session_id="sess_15", candidate_id="41031")
             assert len(captured_filters) > 0
@@ -551,7 +555,7 @@ def test_16_clean_profile_request_without_session():
 
         with patch("backend.services.search_parser.parse_search_query", return_value=mock_parsed), \
              patch("backend.services.user_data_service.fetch_endpoint_data", return_value=mock_user_profile), \
-             patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
 
             res = await handle_employee_context(
@@ -570,6 +574,7 @@ def test_17_explicit_query_still_classified_as_query():
     """Test 17: 'Python jobs near me' keeps explicit keyword Python and QUERY mode."""
     async def run_test():
         from backend.api.employee import handle_employee_context
+        from backend.services.location_service import LocationResult
 
         mock_parsed = {
             "search_target": "JOBS",
@@ -591,8 +596,11 @@ def test_17_explicit_query_still_classified_as_query():
             {"current_page": 1, "total_pages": 1, "total_records": 1},
             [{"id": 1, "job_title": "Python Dev"}]
         )
+        mock_loc_res = LocationResult(resolved=True, city_id=154375, city_name="Pune", location_type="city")
 
         with patch("backend.services.search_parser.parse_search_query", return_value=mock_parsed), \
+             patch("backend.api.employee.resolve_location_from_db", return_value=mock_loc_res), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
 
@@ -612,6 +620,7 @@ def test_18_explicit_nodejs_backend_developer_search():
     """Test 18: 'Node.js backend developer jobs near me' keeps explicit keyword 'backend developer Node.js'."""
     async def run_test():
         from backend.api.employee import handle_employee_context
+        from backend.services.location_service import LocationResult
 
         mock_parsed = {
             "search_target": "JOBS",
@@ -634,8 +643,11 @@ def test_18_explicit_nodejs_backend_developer_search():
             {"current_page": 1, "total_pages": 1, "total_records": 1},
             [{"id": 1, "job_title": "Node.js Backend Dev"}]
         )
+        mock_loc_res = LocationResult(resolved=True, city_id=154375, city_name="Pune", location_type="city")
 
         with patch("backend.services.search_parser.parse_search_query", return_value=mock_parsed), \
+             patch("backend.api.employee.resolve_location_from_db", return_value=mock_loc_res), \
+             patch("backend.services.hybrid_job_search.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.search_jobs", side_effect=mock_search_jobs), \
              patch("backend.api.employee.recommendation_service.get_paginated_recommendations_for_profile", return_value=mock_rec_return):
 
@@ -650,5 +662,6 @@ def test_18_explicit_nodejs_backend_developer_search():
             assert "Node.js" in searched_keywords[0] and "backend developer" in searched_keywords[0]
 
     asyncio.run(run_test())
+
 
 

@@ -107,3 +107,25 @@ def test_missing_current_location_controlled_response():
     current_loc_missing = resolved_raw_loc is None
 
     assert current_loc_missing is True  # Pipeline blocks execution cleanly
+
+
+def test_asa_preposition_skill_extraction():
+    """Verify 'asa' typo preposition is normalized to 'as a' and meta-words like 'programming' are not extracted as separate skills."""
+    import asyncio
+    from backend.services.search_parser import parse_search_query
+
+    test_cases = [
+        ("suggest me candidates with java as a programming skill", ["Java"]),
+        ("suggest me candidtes with java asa programming skill", ["Java"]),
+        ("candidates with react asa frontend skill", ["React"]),
+        ("candidates with sql asa database skill", ["SQL"]),
+        ("Python as a programming skill", ["Python"]),
+        ("Java as a technical skill", ["Java"]),
+        ("React as a frontend skill", ["React"]),
+        ("SQL as a database skill", ["SQL"]),
+    ]
+
+    for q, expected_skills in test_cases:
+        res = asyncio.run(parse_search_query(q, "employee"))
+        assert res.get("skills") == expected_skills, f"Expected skills {expected_skills} for query '{q}', got {res.get('skills')}"
+

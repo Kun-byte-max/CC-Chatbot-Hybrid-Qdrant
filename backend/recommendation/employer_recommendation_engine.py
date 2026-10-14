@@ -253,25 +253,19 @@ class EmployerRecommendationEngine:
         )
 
     def _match_experience(
-        self, req_min_exp: Optional[float], cand_exp_yrs: Optional[float]
+        self, req_min_exp: Optional[float], req_max_exp: Optional[float], cand_exp_yrs: Optional[float]
     ) -> MatchResult:
         """
-        Evaluates Experience matching dimension using seniority fit depth curve (Section 10.3 & Test 15).
-        Δ = cand_exp - req_min_exp
-        Δ = 0.0      -> 90.0 (MATCH)
-        0 < Δ <= 3.0 -> 100.0 (MATCH)
-        3 < Δ <= 5.0 -> 95.0 (MATCH)
-        Δ > 5.0      -> 80.0 (MATCH)
+        Evaluates Experience matching dimension using seniority fit depth curve and upper-bound hard limits.
+        Hard eligibility: cand_exp < req_min_exp OR cand_exp > req_max_exp -> MISMATCH (score = 0.0)
         """
-        if req_min_exp is None or float(req_min_exp) <= 0.0:
+        if (req_min_exp is None or float(req_min_exp) <= 0.0) and req_max_exp is None:
             return MatchResult(
                 dimension=RecommendationDimension.EXPERIENCE,
                 status=MatchStatus.NOT_REQUESTED,
                 score=None,
-                details={"reason": "No minimum experience requested by employer."},
+                details={"reason": "No experience limits requested by employer."},
             )
-
-        req_min = float(req_min_exp)
 
         if cand_exp_yrs is None:
             return MatchResult(
@@ -282,8 +276,10 @@ class EmployerRecommendationEngine:
             )
 
         cand_exp = float(cand_exp_yrs)
-        if cand_exp < req_min:
-            # Phase 1 Filter Violation Protection
+        req_min = float(req_min_exp) if req_min_exp is not None and float(req_min_exp) > 0.0 else None
+        req_max = float(req_max_exp) if req_max_exp is not None else None
+
+        if req_min is not None and cand_exp < req_min:
             return MatchResult(
                 dimension=RecommendationDimension.EXPERIENCE,
                 status=MatchStatus.MISMATCH,
@@ -291,16 +287,26 @@ class EmployerRecommendationEngine:
                 details={"reason": "Candidate experience is below minimum required.", "delta": round(cand_exp - req_min, 2)},
             )
 
-        delta = round(cand_exp - req_min, 4)
+        if req_max is not None and cand_exp > req_max:
+            return MatchResult(
+                dimension=RecommendationDimension.EXPERIENCE,
+                status=MatchStatus.MISMATCH,
+                score=0.0,
+                details={"reason": "Candidate experience exceeds maximum allowed.", "delta": round(cand_exp - req_max, 2)},
+            )
 
-        if delta == 0.0:
-            score = 90.0
-        elif 0.0 < delta <= 3.0:
+        if req_min is not None:
+            delta = round(cand_exp - req_min, 4)
+            if delta == 0.0:
+                score = 90.0
+            elif 0.0 < delta <= 3.0:
+                score = 100.0
+            elif 3.0 < delta <= 5.0:
+                score = 95.0
+            else:
+                score = 80.0
+        else:
             score = 100.0
-        elif 3.0 < delta <= 5.0:
-            score = 95.0
-        else:  # delta > 5.0
-            score = 80.0
 
         return MatchResult(
             dimension=RecommendationDimension.EXPERIENCE,
@@ -308,8 +314,8 @@ class EmployerRecommendationEngine:
             score=score,
             details={
                 "required_min": req_min,
+                "required_max": req_max,
                 "candidate_exp": cand_exp,
-                "delta": delta,
             },
         )
 
@@ -333,7 +339,8 @@ class EmployerRecommendationEngine:
         req_skills = getattr(req_skills_obj, "value", req_skills_obj)
 
         req_exp_obj = getattr(employer_reqs, "experience", None) or getattr(employer_reqs, "min_exp", None) or (employer_reqs.get("min_exp") if isinstance(employer_reqs, dict) else None)
-        req_exp = getattr(req_exp_obj, "min", req_exp_obj)
+        req_min_exp = getattr(req_exp_obj, "min", req_exp_obj if isinstance(req_exp_obj, (int, float)) else None)
+        req_max_exp = getattr(req_exp_obj, "max", None)
 
         req_loc = getattr(employer_reqs, "location", None) or (employer_reqs.get("location") if isinstance(employer_reqs, dict) else None)
         req_budget = getattr(employer_reqs, "budget", None) or (employer_reqs.get("budget") if isinstance(employer_reqs, dict) else None)
@@ -376,7 +383,7 @@ class EmployerRecommendationEngine:
             # Matcher evaluations
             res_title = self._match_title(req_role, c_title)
             res_skill = self._match_skills(req_skills, c_skills)
-            res_exp = self._match_experience(req_exp, c_exp)
+            res_exp = self._match_experience(req_min_exp, req_max_exp, c_exp)
             res_loc = self.location_matcher.match_employer_location(
                 req_location=req_loc,
                 req_work_mode=req_mode,
@@ -408,7 +415,8 @@ class EmployerRecommendationEngine:
             if res_skill.status == MatchStatus.MATCH:
                 explanation_parts.append(f"Matched {res_skill.details.get('matched_count', 0)} requested skill(s)")
             if res_exp.status == MatchStatus.MATCH:
-                explanation_parts.append(f"{c_exp or 0} yrs experience meets requirement ({req_exp} yrs)")
+                exp_label = f"{req_min_exp} yrs min" if req_min_exp is not None else f"{req_max_exp} yrs max"
+                explanation_parts.append(f"{c_exp or 0} yrs experience meets requirement ({exp_label})")
             if res_loc.status == MatchStatus.MATCH:
                 explanation_parts.append("Location requirement satisfied")
 

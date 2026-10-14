@@ -328,6 +328,40 @@ def resolve_location_from_db(raw_location: Optional[str]) -> LocationResult:
                 if fallback_res.resolved and fallback_res.location_type != "unknown":
                     return fallback_res
 
+    # Tertiary LLM Location Normalization Fallback for unlisted typos & regional aliases
+    try:
+        import asyncio
+        from backend.services.llm_service import LLMService
+
+        sys_prompt = "You are a location normalization assistant for India. Given a misspelled, abbreviated, or non-English city/state input, return ONLY a raw text string of the canonical English city or state name (e.g., 'Delhi', 'Bengaluru', 'Uttar Pradesh'). Return null if unrecognizable."
+        
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            llm_out = ""
+        else:
+            try:
+                llm_out = asyncio.run(
+                    LLMService.get_chat_completion(sys_prompt, [{"role": "user", "content": str(raw_location)}], timeout=3.0)
+                )
+            except Exception:
+                llm_out = ""
+
+        clean_llm = llm_out.strip().strip('"').strip("'")
+        if clean_llm and clean_llm.lower() not in ("null", "none"):
+            clean_canon = normalize_location_text(clean_llm)
+            if clean_canon and clean_canon != clean_loc:
+                log.info('[LOCATION_RESOLUTION] llm_location_alias raw="%s" llm_output="%s"', raw_location, clean_llm)
+                llm_res = _execute_db_location_passes(clean_canon, raw_location)
+                if llm_res.resolved and llm_res.location_type != "unknown":
+                    return llm_res
+    except Exception as e:
+        log.warning("LLM location resolution fallback skipped: %s", e)
+
     return res
+
 
 

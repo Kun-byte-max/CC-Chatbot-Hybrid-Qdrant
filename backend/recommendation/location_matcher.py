@@ -2,8 +2,39 @@
 location_matcher.py — Location Matching Module for V1 Recommendation Engine.
 """
 
+from functools import lru_cache
 from typing import Any, Optional
 from backend.recommendation.models import CandidateProfile, JobProfile, LocationMatchResult
+
+
+@lru_cache(maxsize=1024)
+def _normalize_location_text_cached(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = str(value).strip().lower()
+    if not cleaned or cleaned == "unknown" or cleaned == "none":
+        return None
+    return cleaned
+
+
+@lru_cache(maxsize=512)
+def _normalize_work_mode_cached(work_mode: Optional[Any]) -> str:
+    if work_mode is None:
+        return "onsite"
+
+    if isinstance(work_mode, int):
+        if work_mode == 2:
+            return "remote"
+        elif work_mode == 3:
+            return "hybrid"
+        return "onsite"
+
+    mode_str = str(work_mode).strip().lower()
+    if "remote" in mode_str or "wfh" in mode_str or "home" in mode_str:
+        return "remote"
+    elif "hybrid" in mode_str:
+        return "hybrid"
+    return "onsite"
 
 
 class LocationMatcher:
@@ -22,10 +53,7 @@ class LocationMatcher:
         """
         if value is None:
             return None
-        cleaned = str(value).strip().lower()
-        if not cleaned or cleaned == "unknown" or cleaned == "none":
-            return None
-        return cleaned
+        return _normalize_location_text_cached(str(value))
 
     def _normalize_work_mode(self, work_mode: Optional[Any]) -> str:
         """
@@ -34,22 +62,7 @@ class LocationMatcher:
         :param work_mode: Integer (1=Onsite, 2=Remote, 3=Hybrid) or String.
         :return: Standardized work mode string.
         """
-        if work_mode is None:
-            return "onsite"
-
-        if isinstance(work_mode, int):
-            if work_mode == 2:
-                return "remote"
-            elif work_mode == 3:
-                return "hybrid"
-            return "onsite"
-
-        mode_str = str(work_mode).strip().lower()
-        if "remote" in mode_str or "wfh" in mode_str or "home" in mode_str:
-            return "remote"
-        elif "hybrid" in mode_str:
-            return "hybrid"
-        return "onsite"
+        return _normalize_work_mode_cached(work_mode)
 
     def _match_locations(
         self,

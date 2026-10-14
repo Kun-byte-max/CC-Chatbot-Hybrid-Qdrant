@@ -12,10 +12,57 @@ except ModuleNotFoundError:
     from recommendation.skill_matcher import canonicalize_skill  # type: ignore
 
 
+def get_dynamic_job_profile_skills(job_profile: str, limit: int = 5) -> List[str]:
+    """
+    Dynamically fetches required skills for a job title/profile directly from the MySQL database
+    (cyb_company_job_skill JOIN cyb_skill JOIN cyb_company_job).
+    """
+    if not job_profile or not isinstance(job_profile, str):
+        return []
+    words = [w.strip() for w in job_profile.split() if len(w.strip()) > 2]
+    if not words:
+        return []
+
+    conn = None
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        conds = ' OR '.join(['j.job_title LIKE %s OR d.name LIKE %s' for _ in words])
+        params = []
+        for w in words:
+            params.extend([f'%{w}%', f'%{w}%'])
+
+        sql = f'''
+            SELECT s.name, COUNT(*) as cnt
+            FROM cyb_company_job_skill js
+            JOIN cyb_skill s ON js.skill = s.id
+            JOIN cyb_company_job j ON js.company_job = j.id
+            LEFT JOIN cyb_department d ON j.department = d.id
+            WHERE j.status = 1 AND (js.is_deleted IS NULL OR js.is_deleted = 0) AND s.status = 1 AND ({conds})
+            GROUP BY s.id, s.name
+            ORDER BY cnt DESC
+            LIMIT %s
+        '''
+        c.execute(sql, params + [limit])
+        rows = c.fetchall()
+        if rows:
+            return [r['name'] for r in rows if r.get('name')]
+    except Exception:
+        pass
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return []
+
+
 def infer_job_skills(title: str, dept: str, desc: str) -> List[str]:
     """
     Infers complete job skills from title, department, and description text.
     Preserves all matching skills found in the job text and canonicalizes them.
+    Dynamically queries database for job profile skill mappings before fallback.
     """
     title_str = title or ""
     dept_str = dept or ""
@@ -24,10 +71,15 @@ def infer_job_skills(title: str, dept: str, desc: str) -> List[str]:
 
     skills = []
 
-    # 1. Map from predefined JOB_PROFILE_SKILLS_MAP
-    for k, s_list in JOB_PROFILE_SKILLS_MAP.items():
-        if k.lower() in title_str.lower() or k.lower() in dept_str.lower():
-            skills.extend(s_list)
+    # 1. Dynamic Database Mapping for job profile skills
+    dyn_skills = get_dynamic_job_profile_skills(f"{title_str} {dept_str}")
+    if dyn_skills:
+        skills.extend(dyn_skills)
+    else:
+        # Fallback to predefined static map
+        for k, s_list in JOB_PROFILE_SKILLS_MAP.items():
+            if k.lower() in title_str.lower() or k.lower() in dept_str.lower():
+                skills.extend(s_list)
 
     # 2. Comprehensive tech & role term scanning
     tech_candidates = [

@@ -2,8 +2,17 @@
 skill_matcher.py — Skill Matching Module for V1 Recommendation Engine.
 """
 
+import re
+from functools import lru_cache
 from typing import List, Optional, Set
 from backend.recommendation.models import CandidateProfile, JobProfile, SkillMatchResult
+
+RE_NON_ALPHANUM = re.compile(r'[^a-z0-9]')
+
+
+@lru_cache(maxsize=1024)
+def _canon_alphanum(s: str) -> str:
+    return RE_NON_ALPHANUM.sub('', s.lower())
 
 
 SKILL_CANONICAL_MAP = {
@@ -46,6 +55,7 @@ SKILL_CANONICAL_MAP = {
 }
 
 
+@lru_cache(maxsize=2048)
 def canonicalize_skill(skill: str) -> str:
     """
     Deterministically resolves skill variants and aliases to a single canonical skill name.
@@ -89,9 +99,7 @@ class SkillMatcher:
             if key and key not in seen:
                 seen.add(key)
                 normalized.append(canon)
-
         return normalized
-
 
     def _match_skills(
         self, candidate_skills: Optional[List[str]], required_skills: Optional[List[str]]
@@ -100,8 +108,6 @@ class SkillMatcher:
         Internal evaluator calculating skill match metrics between skill lists.
         Supports exact matching as well as punctuation/whitespace-invariant matching (e.g. Next.js vs Next Js).
         """
-        import re
-
         cand_list = self._normalize_skills(candidate_skills)
         req_list = self._normalize_skills(required_skills)
 
@@ -110,26 +116,23 @@ class SkillMatcher:
 
         # Zero required skills edge case
         if not req_list:
-            score = 100.0 if not cand_list else 0.0
             return SkillMatchResult(
-                score=score,
+                score=0.0,
                 matched_skills=[],
                 missing_skills=[],
                 extra_skills=cand_list,
                 total_required=0,
                 total_matched=0,
+                match_level="unknown",
             )
 
-        def _canon(s: str) -> str:
-            return re.sub(r'[^a-z0-9]', '', s.lower())
-
-        cand_canon_map = {_canon(s): s for s in cand_list if _canon(s)}
+        cand_canon_map = {_canon_alphanum(s): s for s in cand_list if _canon_alphanum(s)}
 
         matched = []
         missing = []
 
         for req in req_list:
-            req_canon = _canon(req)
+            req_canon = _canon_alphanum(req)
             if req in cand_set:
                 matched.append(req)
             elif req_canon and req_canon in cand_canon_map:
@@ -137,9 +140,8 @@ class SkillMatcher:
             else:
                 missing.append(req)
 
-        matched_canon_set = {_canon(m) for m in matched}
-        extra = [s for s in cand_list if s not in req_set and _canon(s) not in matched_canon_set]
-
+        matched_canon_set = {_canon_alphanum(m) for m in matched}
+        extra = [s for s in cand_list if s not in req_set and _canon_alphanum(s) not in matched_canon_set]
         total_required = len(req_list)
         total_matched = len(matched)
 
@@ -152,6 +154,13 @@ class SkillMatcher:
 
         score = max(0.0, min(100.0, score))
 
+        if total_matched == total_required and total_required > 0:
+            m_level = "exact"
+        elif total_matched > 0:
+            m_level = "partial"
+        else:
+            m_level = "none"
+
         return SkillMatchResult(
             score=score,
             matched_skills=matched,
@@ -159,6 +168,7 @@ class SkillMatcher:
             extra_skills=extra,
             total_required=total_required,
             total_matched=total_matched,
+            match_level=m_level,
         )
 
     def evaluate_profiles(

@@ -79,7 +79,10 @@ class SearchQuery(BaseModel):
     salary_max: Optional[float] = None
 
     work_mode: Optional[str] = None
+    employment_type: Optional[str] = None
+    role_type_id: Optional[int] = None
     company: Optional[str] = None
+    urgent: Optional[bool] = None
     clear_filters: Optional[List[str]] = Field(default_factory=list)
 
     sort_by: SortMode = SortMode.RECOMMENDATION
@@ -100,7 +103,10 @@ class SearchQuery(BaseModel):
             "salary_min": self.salary_min,
             "salary_max": self.salary_max,
             "work_mode": (self.work_mode or "").lower().strip(),
+            "employment_type": (self.employment_type or "").lower().strip(),
+            "role_type_id": self.role_type_id,
             "company": (self.company or "").lower().strip(),
+            "urgent": self.urgent,
         }
         encoded = json.dumps(data, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:16]

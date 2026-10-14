@@ -3,6 +3,7 @@ recommendation_engine.py — Master Recommendation Engine Orchestrator.
 Orchestrates all matchers, ScoreCalculator, and ExplanationGenerator.
 """
 
+import re
 from typing import List, Optional, Any
 
 try:
@@ -123,14 +124,17 @@ class RecommendationEngine:
                 and getattr(q_title_res, "match_level", "none") in ("exact", "contains", "keyword_match")
             )
             if not query_match and getattr(job, "required_skills", None):
-                q_term_lower = query_term.lower()
-                q_canon = canonicalize_skill(query_term).lower()
-                for req_sk in job.required_skills:
-                    req_sk_canon = canonicalize_skill(str(req_sk)).lower()
-                    req_str_lower = str(req_sk).lower()
-                    if q_term_lower == req_str_lower or q_canon == req_sk_canon or q_term_lower in req_str_lower or req_str_lower in q_term_lower:
-                        query_match = True
-                        break
+                q_words = set(re.findall(r"\w+", query_term.lower()))
+                is_explicit_role = bool(q_words & (self.title_matcher.GENERIC_ROLE_SUFFIXES | self.title_matcher.SENIORITY_WORDS))
+                if not is_explicit_role:
+                    q_term_lower = query_term.lower()
+                    q_canon = canonicalize_skill(query_term).lower()
+                    for req_sk in job.required_skills:
+                        req_sk_canon = canonicalize_skill(str(req_sk)).lower()
+                        req_str_lower = str(req_sk).lower()
+                        if q_term_lower == req_str_lower or q_canon == req_sk_canon or q_term_lower in req_str_lower or req_str_lower in q_term_lower:
+                            query_match = True
+                            break
             domain_gate_passed = query_match
         elif cand_skills or cand_title:
             # 2. Profile Skills or Candidate Title Relevance (Tests A, B, C, E, G-O)
@@ -139,6 +143,20 @@ class RecommendationEngine:
                 title_res
                 and getattr(title_res, "match_level", "none") in ("exact", "contains", "keyword_match")
             )
+            # If job required_skills is empty, check if any candidate skill matches job title or description with token boundaries
+            if not skill_match and not title_match and not getattr(job, "required_skills", None) and cand_skills:
+                raw_d = getattr(job, "raw_data", {}) or {}
+                j_desc = raw_d.get("job_description") or raw_d.get("description") or getattr(job, "description", "") or ""
+                job_text = f"{getattr(job, 'title', '')} {j_desc}".lower()
+                for c_sk in cand_skills:
+                    c_sk_clean = str(c_sk).strip().lower()
+                    if len(c_sk_clean) >= 2:
+                        # Allow punctuation at end of skill (like c++, c#) or standard word boundaries
+                        pattern = r'(?:^|\s|[\(\[\{,;:])' + re.escape(c_sk_clean) + r'(?:$|\s|[\)\}\],;:!\?])'
+                        if re.search(pattern, job_text) or (c_sk_clean.isalnum() and re.search(r'\b' + re.escape(c_sk_clean) + r'\b', job_text)):
+                            skill_match = True
+                            break
+
             domain_gate_passed = skill_match or title_match
         else:
             # 3. No query term and no profile signals -> General search fallback (Test D)
@@ -204,20 +222,22 @@ class RecommendationEngine:
             if q_title_res.score > title_res.score:
                 title_res = q_title_res
 
-            from backend.recommendation.skill_matcher import canonicalize_skill
-            q_canon = canonicalize_skill(search_query_title).lower()
-            q_lower = search_query_title.lower()
-            matched_q_skill = False
-            for req_sk in (job.required_skills or []):
-                req_sk_canon = canonicalize_skill(str(req_sk)).lower()
-                req_str_lower = str(req_sk).lower()
-                if q_lower == req_str_lower or q_canon == req_sk_canon or q_lower in req_str_lower or req_str_lower in q_lower:
-                    matched_q_skill = True
-                    break
-            if matched_q_skill and skill_res.score < 100.0:
-                skill_res.score = max(skill_res.score, 90.0)
-                if search_query_title not in (skill_res.matched_skills or []):
-                    skill_res.matched_skills = list(skill_res.matched_skills or []) + [search_query_title]
+            # Only inflate skill score if title is relevant to query term
+            if getattr(q_title_res, "match_level", "none") in ("exact", "contains", "keyword_match"):
+                from backend.recommendation.skill_matcher import canonicalize_skill
+                q_canon = canonicalize_skill(search_query_title).lower()
+                q_lower = search_query_title.lower()
+                matched_q_skill = False
+                for req_sk in (job.required_skills or []):
+                    req_sk_canon = canonicalize_skill(str(req_sk)).lower()
+                    req_str_lower = str(req_sk).lower()
+                    if q_lower == req_str_lower or q_canon == req_sk_canon or q_lower in req_str_lower or req_str_lower in q_lower:
+                        matched_q_skill = True
+                        break
+                if matched_q_skill and skill_res.score < 100.0:
+                    skill_res.score = max(skill_res.score, 90.0)
+                    if search_query_title not in (skill_res.matched_skills or []):
+                        skill_res.matched_skills = list(skill_res.matched_skills or []) + [search_query_title]
 
         # 4. Experience Match
         exp_res = self.experience_matcher.evaluate_profiles(candidate, job)
@@ -306,8 +326,13 @@ class RecommendationEngine:
             if rec_res is not None:
                 results.append(rec_res)
 
-        # DETERMINISTIC SORT by overall_score descending, then job_id descending tie-breaker
-        results.sort(key=lambda r: (-r.overall_score, -int(r.job_id or 0)))
+        # DETERMINISTIC SORT by overall_score descending, then skill_score descending secondary key (preserving insertion order for complete ties)
+        results.sort(
+            key=lambda r: (
+                -r.overall_score,
+                -float(getattr(r.score_result, "skill_score", getattr(r.skill_result, "score", 0.0))),
+            )
+        )
 
         # Assign 1-based global_rank strictly post-sort
         for idx, res in enumerate(results, start=1):
@@ -331,6 +356,12 @@ class RecommendationEngine:
         results: List[RecommendationResult] = [
             self.recommend(candidate, job) for candidate in candidates
         ]
-        results.sort(key=lambda r: (-r.overall_score, -int(r.candidate_id or 0)))
+        results = [r for r in results if r is not None]
+        results.sort(
+            key=lambda r: (
+                -r.overall_score,
+                -float(getattr(r.score_result, "skill_score", getattr(r.skill_result, "score", 0.0))),
+            )
+        )
         return results
 

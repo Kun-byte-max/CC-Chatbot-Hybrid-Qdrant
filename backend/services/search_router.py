@@ -39,6 +39,7 @@ async def dispatch_search_target(
     user_slug: Optional[str] = None,
     user_profile_api_data: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = "default_session",
+    parsed_query: Optional[Dict[str, Any]] = None,
     **kwargs: Any
 ) -> Dict[str, Any]:
     """
@@ -63,6 +64,7 @@ async def dispatch_search_target(
             user_slug=user_slug,
             user_profile_api_data=user_profile_api_data,
             session_id=session_id,
+            parsed_query=parsed_query,
             **kwargs
         )
 
@@ -79,6 +81,7 @@ async def dispatch_search_target(
             user_slug=user_slug,
             user_profile_api_data=user_profile_api_data,
             session_id=session_id,
+            parsed_query=parsed_query,
             **kwargs
         )
 
@@ -93,6 +96,7 @@ async def dispatch_search_target(
             user_slug=user_slug,
             user_profile_api_data=user_profile_api_data,
             session_id=session_id,
+            parsed_query=parsed_query,
             **kwargs
         )
 

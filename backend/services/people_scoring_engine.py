@@ -187,21 +187,36 @@ class EmployeePeopleScoringEngine:
 
     @classmethod
     def match_experience(
-        cls, requested_exp: Optional[float], candidate_exp: Optional[float]
+        cls,
+        requested_exp: Optional[float],
+        candidate_exp: Optional[float],
+        requested_exp_max: Optional[float] = None,
     ) -> Tuple[float, bool]:
         """
-        Evaluates numeric experience eligibility.
-        If requested_exp is 3.0+, candidate_exp < 3.0 returns (0.0, False) -> MISMATCH.
+        Evaluates numeric experience eligibility and bounded gradient score for min & max bounds.
+        - Minimum bound (requested_exp): if candidate_exp < requested_exp -> (0.0, False) [Hard Ineligibility].
+        - Maximum bound (requested_exp_max): if candidate_exp > requested_exp_max -> (0.0, False) [Hard Ineligibility].
+        - If min > max -> (0.0, False) [Hard Ineligibility].
         """
+        c_exp = float(candidate_exp) if candidate_exp is not None else 0.0
+
+        if requested_exp is not None and requested_exp > 0.0:
+            if c_exp < requested_exp:
+                return 0.0, False
+
+        if requested_exp_max is not None:
+            if c_exp > requested_exp_max:
+                return 0.0, False
+
+        if requested_exp is not None and requested_exp_max is not None and requested_exp > requested_exp_max:
+            return 0.0, False
+
         if requested_exp is None or requested_exp <= 0.0:
             return 100.0, True
 
-        c_exp = candidate_exp if candidate_exp is not None else 0.0
-
-        if c_exp < requested_exp:
-            return 0.0, False
-
-        return 100.0, True
+        excess = c_exp - requested_exp
+        exp_score = min(100.0, round(90.0 + 2.0 * excess, 2))
+        return exp_score, True
 
     @classmethod
     def match_location(
@@ -270,36 +285,144 @@ class EmployeePeopleScoringEngine:
         return 0.0
 
     @classmethod
+    def match_name(cls, requested_name: Optional[str], candidate_name: Optional[str]) -> float:
+        """
+        Evaluates candidate name relevance tier:
+        - Exact full name match: 100.0
+        - Multi-token reordered full name match: 95.0
+        - Exact single token / first / last name match: 90.0
+        - Partial token prefix match: 70.0
+        - Partial token coverage: 50.0
+        - Unmatched: 0.0
+        - Not requested: 100.0 (Neutral)
+        """
+        if not requested_name or not str(requested_name).strip():
+            return 100.0
+        if not candidate_name or not str(candidate_name).strip():
+            return 0.0
+
+        req_clean = str(requested_name).strip().lower()
+        cand_clean = str(candidate_name).strip().lower()
+
+        if req_clean == cand_clean:
+            return 100.0
+
+        req_tokens = [t for t in re.findall(r"\b[a-z0-9]+\b", req_clean) if t]
+        cand_tokens = [t for t in re.findall(r"\b[a-z0-9]+\b", cand_clean) if t]
+
+        if not req_tokens or not cand_tokens:
+            return 0.0
+
+        req_set = set(req_tokens)
+        cand_set = set(cand_tokens)
+
+        if req_set == cand_set and len(req_set) >= 2:
+            return 95.0
+
+        overlap = req_set.intersection(cand_set)
+
+        if len(req_tokens) == 1 and len(overlap) == 1:
+            return 90.0
+
+        if len(req_tokens) >= 2 and len(overlap) == len(req_set):
+            return 90.0
+
+        if len(req_tokens) >= 2 and len(overlap) >= 1:
+            # Check if non-overlapping token is an initial or prefix
+            has_prefix = False
+            missing_reqs = req_set - overlap
+            for m_req in missing_reqs:
+                for c_tok in cand_set:
+                    if c_tok.startswith(m_req) or m_req.startswith(c_tok):
+                        has_prefix = True
+                        break
+            return 70.0 if has_prefix else 50.0
+
+        # Check prefix match for single token
+        if len(req_tokens) == 1:
+            req_t = req_tokens[0]
+            for c_tok in cand_set:
+                if c_tok.startswith(req_t) or req_t.startswith(c_tok):
+                    return 60.0
+
+        return 0.0
+
+    @classmethod
+    def match_company(cls, requested_company: Optional[str], candidate_company: Optional[str]) -> float:
+        """
+        Evaluates company relevance score using normalized matching:
+        - Exact normalized company match: 100.0
+        - Partial company token match: 80.0
+        - Unmatched: 0.0
+        - Not requested: 100.0 (Neutral)
+        """
+        if not requested_company or not str(requested_company).strip():
+            return 100.0
+        if not candidate_company or not str(candidate_company).strip():
+            return 0.0
+
+        try:
+            from backend.repositories.people_repository import normalize_company_name
+        except ModuleNotFoundError:
+            from repositories.people_repository import normalize_company_name  # type: ignore
+
+        req_norm = normalize_company_name(requested_company)
+        cand_norm = normalize_company_name(candidate_company)
+
+        if req_norm and cand_norm and req_norm == cand_norm:
+            return 100.0
+
+        req_clean = str(requested_company).strip().lower()
+        cand_clean = str(candidate_company).strip().lower()
+
+        if req_clean and cand_clean and (req_clean in cand_clean or cand_clean in req_clean):
+            return 80.0
+
+        if req_norm and cand_norm and (req_norm in cand_norm or cand_norm in req_norm):
+            return 80.0
+
+        return 0.0
+
+    @classmethod
     def score_candidate(
         cls,
         candidate: Dict[str, Any],
+        requested_name: Optional[str] = None,
         requested_title: Optional[str] = None,
         requested_skills: Optional[List[str]] = None,
         requested_exp: Optional[float] = None,
+        requested_exp_max: Optional[float] = None,
         requested_location: Optional[str] = None,
+        requested_company: Optional[str] = None,
         requested_seniority: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Calculates weighted overall score for a candidate dictionary.
-        Core Relevance (Title & Skills) dominates.
-        Seniority compatibility acts strictly as a secondary refinement.
+        Calculates weighted overall relevance score for candidate dictionary.
+        Supports active signal weight dynamic scaling (Name 0.25, Title 0.25, Skill 0.25, Company 0.15, Exp 0.05, Loc 0.05).
+        Seniority acts strictly as a post-base refinement modifier (+15.0, 0.0, -20.0) bounded to 100.0.
         """
+        name_score = cls.match_name(requested_name, candidate.get("name"))
         title_score, title_tier = cls.match_title(requested_title, candidate.get("current_title"))
         skill_score, matched_skills, missing_skills = cls.match_skills(requested_skills, candidate.get("skills"))
-        exp_score, exp_meets = cls.match_experience(requested_exp, candidate.get("total_experience_years"))
+        exp_score, exp_meets = cls.match_experience(requested_exp, candidate.get("total_experience_years"), requested_exp_max=requested_exp_max)
         loc_score = cls.match_location(requested_location, candidate.get("city"), candidate.get("state"))
+        company_score = cls.match_company(requested_company, candidate.get("company"))
         seniority_score = cls.score_seniority_compatibility(requested_seniority, candidate.get("current_title"))
 
-        # Weighted Numerator / Denominator
+        # Weighted Numerator / Denominator Scaling
         weights = {}
-        if requested_title and requested_title.strip():
-            weights["title"] = 0.40
+        if requested_name and str(requested_name).strip():
+            weights["name"] = 0.25
+        if requested_title and str(requested_title).strip():
+            weights["title"] = 0.25
         if requested_skills:
-            weights["skill"] = 0.35
+            weights["skill"] = 0.25
+        if requested_company and str(requested_company).strip():
+            weights["company"] = 0.15
         if requested_exp is not None and requested_exp > 0:
-            weights["exp"] = 0.15
-        if requested_location and requested_location.strip():
-            weights["location"] = 0.10
+            weights["exp"] = 0.05
+        if requested_location and str(requested_location).strip():
+            weights["location"] = 0.05
 
         if not weights:
             # Default scoring if no explicit search criteria specified
@@ -307,26 +430,31 @@ class EmployeePeopleScoringEngine:
         else:
             total_w = sum(weights.values())
             weighted_sum = (
-                weights.get("title", 0.0) * title_score
+                weights.get("name", 0.0) * name_score
+                + weights.get("title", 0.0) * title_score
                 + weights.get("skill", 0.0) * skill_score
+                + weights.get("company", 0.0) * company_score
                 + weights.get("exp", 0.0) * exp_score
                 + weights.get("location", 0.0) * loc_score
             )
             base_score = round(weighted_sum / total_w, 2)
 
-        # Apply Seniority Refinement Score (secondary modifier)
-        final_score = round(max(0.0, base_score + seniority_score), 2)
+        # Apply Seniority Refinement Score (secondary modifier, bounded to [0.0, 100.0])
+        final_score = round(min(100.0, max(0.0, base_score + seniority_score)), 2)
 
-        is_eligible = exp_meets and (skill_score > 0.0 or not requested_skills)
+        skills_meets = (not missing_skills) if requested_skills else True
+        is_eligible = exp_meets and skills_meets
 
         return {
             "candidate_id": candidate.get("id"),
             "final_score": final_score,
+            "name_score": name_score,
             "title_score": title_score,
             "title_tier": title_tier,
             "skill_score": skill_score,
             "matched_skills": matched_skills,
             "missing_skills": missing_skills,
+            "company_score": company_score,
             "exp_score": exp_score,
             "exp_meets": exp_meets,
             "loc_score": loc_score,
@@ -340,18 +468,22 @@ def people_rank_key(candidate: Dict[str, Any], scoring: Dict[str, Any]) -> Tuple
     Canonical deterministic rank key function for employee PEOPLE_SEARCH.
     Hierarchy:
     1. is_eligible (True=0, False=1)
-    2. final_score (Descending via negative float)
-    3. title_score (Descending)
-    4. skill_score (Descending)
-    5. exp_score (Descending)
-    6. loc_score (Descending)
-    7. seniority_score (Descending)
-    8. candidate_id (Descending numeric tie-breaker)
+    2. final_score (Descending)
+    3. name_score (Descending)
+    4. title_score (Descending)
+    5. skill_score (Descending)
+    6. company_score (Descending)
+    7. exp_score (Descending)
+    8. loc_score (Descending)
+    9. seniority_score (Descending)
+    10. candidate_id (Descending numeric tie-breaker: -int(id))
     """
     elig_sort = 0 if scoring.get("is_eligible", True) else 1
     f_score = -round(scoring.get("final_score", 0.0), 2)
+    n_score = -round(scoring.get("name_score", 0.0), 2)
     t_score = -round(scoring.get("title_score", 0.0), 2)
     s_score = -round(scoring.get("skill_score", 0.0), 2)
+    c_score = -round(scoring.get("company_score", 0.0), 2)
     e_score = -round(scoring.get("exp_score", 0.0), 2)
     l_score = -round(scoring.get("loc_score", 0.0), 2)
     sen_score = -round(scoring.get("seniority_score", 0.0), 2)
@@ -361,4 +493,5 @@ def people_rank_key(candidate: Dict[str, Any], scoring: Dict[str, Any]) -> Tuple
     except (ValueError, TypeError):
         cand_id = 0
 
-    return (elig_sort, f_score, t_score, s_score, e_score, l_score, sen_score, cand_id)
+    return (elig_sort, f_score, n_score, t_score, s_score, c_score, e_score, l_score, sen_score, cand_id)
+

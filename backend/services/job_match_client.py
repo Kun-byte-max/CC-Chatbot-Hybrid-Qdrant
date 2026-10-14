@@ -79,8 +79,8 @@ class JobMatchClient:
         filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Calls POST /v1/find-jobs for personalized job recommendations.
-        Strictly uses JSON request body as the sole source of truth.
+        Calls GET/POST /v1/find-jobs for personalized vector job recommendations.
+        Supports both GET query param (login_user_id) and POST JSON body.
         """
         if not JOB_MATCH_ENABLED:
             log.info("Job Match API integration is disabled (JOB_MATCH_ENABLED=false).")
@@ -91,21 +91,24 @@ class JobMatchClient:
 
         final_limit = limit if limit is not None else JOB_MATCH_LIMIT
         url = f"{self.base_url}/v1/find-jobs"
-        payload = {
-            "candidate_id": int(candidate_id),
-            "final_limit": int(final_limit),
-            "filters": filters or {},
-        }
+        params = {"login_user_id": int(candidate_id), "limit": int(final_limit)}
 
-        log.info("[JobMatch] POST /v1/find-jobs for candidate_id=%s limit=%d", candidate_id, final_limit)
+        log.info("[JobMatch] GET /v1/find-jobs for login_user_id=%s limit=%d", candidate_id, final_limit)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, json=payload, headers=self._headers())
+                response = await client.get(url, params=params, headers=self._headers())
+                if response.status_code != 200:
+                    payload = {
+                        "candidate_id": int(candidate_id),
+                        "final_limit": int(final_limit),
+                        "filters": filters or {},
+                    }
+                    response = await client.post(url, json=payload, headers=self._headers())
 
             if response.status_code == 200:
                 data = response.json()
-                if not isinstance(data, dict) or "results" not in data:
+                if not isinstance(data, dict) or ("data" not in data and "results" not in data):
                     log.warning("[JobMatch] Malformed 200 response structure from find-jobs.")
                     raise JobMatchUnavailableException("Malformed response payload from Job Match API.")
                 return data
@@ -132,7 +135,7 @@ class JobMatchClient:
 
     async def match_preview(self, candidate_id: int, job_id: int) -> Dict[str, Any]:
         """
-        Calls POST /v1/match/preview for detailed job-candidate match breakdown.
+        Calls GET/POST /v1/match/preview for detailed job-candidate match breakdown.
         Gated by JOB_MATCH_ENABLED flag.
         """
         if not JOB_MATCH_ENABLED:
@@ -143,17 +146,16 @@ class JobMatchClient:
             raise JobMatchContractException("Invalid candidate_id or job_id for match_preview.")
 
         url = f"{self.base_url}/v1/match/preview"
-        payload = {
-            "candidate_id": int(candidate_id),
-            "job_id": int(job_id),
-            "weights": {},
-        }
+        params = {"candidate_id": int(candidate_id), "job_id": int(job_id)}
 
-        log.info("[JobMatch] POST /v1/match/preview for candidate_id=%s job_id=%s", candidate_id, job_id)
+        log.info("[JobMatch] GET /v1/match/preview for candidate_id=%s job_id=%s", candidate_id, job_id)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, json=payload, headers=self._headers())
+                response = await client.get(url, params=params, headers=self._headers())
+                if response.status_code != 200:
+                    payload = {"candidate_id": int(candidate_id), "job_id": int(job_id), "weights": {}}
+                    response = await client.post(url, json=payload, headers=self._headers())
 
             if response.status_code == 200:
                 data = response.json()

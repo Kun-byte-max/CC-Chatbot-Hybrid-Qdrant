@@ -119,6 +119,16 @@ def smart_extract_terms(user_message: str) -> Tuple[str, str]:
     return role_keyword, location
 
 def is_career_query(msg: str) -> bool:
+    """
+    Dynamically determines if incoming user text expresses a job seeker / career search intent
+    (looking for jobs, openings, career opportunities, skill matching) using LLM Intent Classification.
+    Falls back gracefully to keyword signal check if LLM API is unavailable.
+    """
+    if not msg or not str(msg).strip():
+        return False
+
+    msg_lower = str(msg).lower().strip()
+
     signals = [
         "job", "jobs", "role", "roles", "vacancy", "vacancies",
         "opening", "openings", "hiring", "position", "positions",
@@ -129,7 +139,50 @@ def is_career_query(msg: str) -> bool:
         "profile", "rating", "cc id", "cc pro", "verification",
         "verified", "employer", "review", "star rating",
     ]
-    return any(s in msg.lower() for s in signals)
+
+    # 1. Fast cache / direct keyword check for standard triggers
+    if any(s in msg_lower for s in signals):
+        return True
+
+    # 2. Dynamic LLM Intent Classification
+    try:
+        from backend.config.config import OPENAI_API_KEY, OPENAI_API_URL, MODEL
+    except ModuleNotFoundError:
+        try:
+            from config.config import OPENAI_API_KEY, OPENAI_API_URL, MODEL  # type: ignore
+        except Exception:
+            OPENAI_API_KEY = None
+
+    if OPENAI_API_KEY:
+        try:
+            import requests
+            prompt = (
+                "You are an intent classifier for a job search platform.\n"
+                "Classify whether the user input is a JOB SEEKER / CANDIDATE looking for job openings, career opportunities, or profile-matching jobs.\n"
+                "Respond strictly with YES or NO.\n"
+                f"User Input: \"{msg}\""
+            )
+            res = requests.post(
+                OPENAI_API_URL,
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 5,
+                    "temperature": 0.0,
+                },
+                timeout=2.5
+            )
+            if res.status_code == 200:
+                answer = res.json()["choices"][0]["message"]["content"].strip().upper()
+                if "YES" in answer:
+                    return True
+                elif "NO" in answer:
+                    return False
+        except Exception as e:
+            log.warning("Dynamic LLM career intent classification fallback triggered: %s", e)
+
+    return False
 
 def is_faq_query(msg: str) -> bool:
     triggers = [
@@ -140,7 +193,58 @@ def is_faq_query(msg: str) -> bool:
     return any(t in msg.lower() for t in triggers)
 
 def is_employer_hiring_query(msg: str) -> bool:
-    msg_lower = msg.lower()
-    return any(t in msg_lower for t in EMPLOYER_TRIGGERS)
+    """
+    Dynamically determines if incoming user text expresses an employer/recruiter hiring intent
+    versus a job seeker search using LLM Intent Classification.
+    Falls back gracefully to keyword trigger check if LLM API is unavailable or unconfigured.
+    """
+    if not msg or not str(msg).strip():
+        return False
+
+    msg_lower = str(msg).lower().strip()
+
+    # 1. Fast cache / direct keyword check for standard triggers
+    if any(t in msg_lower for t in EMPLOYER_TRIGGERS):
+        return True
+
+    # 2. Dynamic LLM Intent Classification
+    try:
+        from backend.config.config import OPENAI_API_KEY, OPENAI_API_URL, MODEL
+    except ModuleNotFoundError:
+        try:
+            from config.config import OPENAI_API_KEY, OPENAI_API_URL, MODEL  # type: ignore
+        except Exception:
+            OPENAI_API_KEY = None
+
+    if OPENAI_API_KEY:
+        try:
+            import requests
+            prompt = (
+                "You are an intent classifier for a recruitment platform.\n"
+                "Classify whether the user input is an EMPLOYER trying to hire/recruit candidates or post a job requirement.\n"
+                "Respond strictly with YES or NO.\n"
+                f"User Input: \"{msg}\""
+            )
+            res = requests.post(
+                OPENAI_API_URL,
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 5,
+                    "temperature": 0.0,
+                },
+                timeout=2.5
+            )
+            if res.status_code == 200:
+                answer = res.json()["choices"][0]["message"]["content"].strip().upper()
+                if "YES" in answer:
+                    return True
+                elif "NO" in answer:
+                    return False
+        except Exception as e:
+            log.warning("Dynamic LLM employer intent classification fallback triggered: %s", e)
+
+    return False
 
 

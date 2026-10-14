@@ -47,6 +47,7 @@ def parse_employer_query(
     existing_requirements: Optional[EmployerSearchRequirements] = None,
     source: ProvenanceSource = ProvenanceSource.QUERY,
     user_location: Optional[Any] = None,
+    parsed_llm: Optional[Dict[str, Any]] = None,
 ) -> EmployerSearchRequirements:
     """
     Parses an employer search query into a canonical EmployerSearchRequirements instance via LLM extraction.
@@ -62,19 +63,22 @@ def parse_employer_query(
     text = query_text.strip()
     text_lower = text.lower()
 
-    # Call LLM search parser for native multilingual semantic extraction
-    parsed_llm = {}
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import nest_asyncio
-            nest_asyncio.apply()
-            parsed_llm = loop.run_until_complete(parse_search_query(text, "employer", messages=[]))
-        else:
-            parsed_llm = asyncio.run(parse_search_query(text, "employer", messages=[]))
-    except Exception:
-        log.warning("LLM employer query extraction fallback to deterministic rules")
+    # Reuse provided parsed_llm if available, otherwise call LLM search parser
+    if not parsed_llm or not isinstance(parsed_llm, dict):
         parsed_llm = {}
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                parsed_llm = {}
+            else:
+                parsed_llm = asyncio.run(parse_search_query(text, "employer", messages=[]))
+        except Exception:
+            log.warning("LLM employer query extraction fallback to deterministic rules")
+            parsed_llm = {}
 
     # Extract Role & Skills
     role_val = parsed_llm.get("keyword")
@@ -116,23 +120,25 @@ def parse_employer_query(
                     role_val = extracted
 
     # Skill detection fallback
-    known_techs = ["react", "reactjs", "javascript", "js", "node", "nodejs", "node.js", "python", "py", "sql", "php", "next.js", "jquery"]
-    for tech in known_techs:
-        if re.search(r"\b" + re.escape(tech) + r"\b", text_lower) and tech not in skills_val:
-            skills_val.append(tech)
+    clear_skills_requested = bool(re.search(r"\b(?:clear|remove|delete)\s+(?:the\s+)?skill[s]?\b", text_lower))
+    if not clear_skills_requested:
+        known_techs = ["react", "reactjs", "javascript", "js", "node", "nodejs", "node.js", "python", "py", "sql", "php", "next.js", "jquery"]
+        for tech in known_techs:
+            if re.search(r"\b" + re.escape(tech) + r"\b", text_lower) and tech not in skills_val:
+                skills_val.append(tech)
 
-    # Apply role/skill extraction: ensure technology is populated in skills_val while preserving full role_val
-    if role_val and any(t in str(role_val).lower() for t in ["react", "python", "java", "node", "nodejs", "node.js"]):
-        tech_tokens = [t for t in ["react", "python", "java", "node", "nodejs", "node.js"] if t in str(role_val).lower()]
-        for t in tech_tokens:
-            if t not in skills_val:
-                skills_val.append(t)
+        # Apply role/skill extraction: ensure technology is populated in skills_val while preserving full role_val
+        if role_val and any(t in str(role_val).lower() for t in ["react", "python", "java", "node", "nodejs", "node.js"]):
+            tech_tokens = [t for t in ["react", "python", "java", "node", "nodejs", "node.js"] if t in str(role_val).lower()]
+            for t in tech_tokens:
+                if t not in skills_val:
+                    skills_val.append(t)
 
     if role_val:
         norm_role = normalize_role_title(role_val)
         reqs.role = ProvenanceValue[str](value=norm_role, source=source)
     
-    if skills_val:
+    if skills_val and not clear_skills_requested:
         norm_sk = normalize_skills(skills_val)
         reqs.skills = ProvenanceValue[list](value=norm_sk, source=source)
 
@@ -231,11 +237,21 @@ def parse_employer_query(
 
 
 
-    # 3. Experience Parsing
-    exp_match = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?|yr)", text_lower)
-    if exp_match:
-        min_e = float(exp_match.group(1))
-        reqs.experience = ExperienceRequirement(min=min_e, max=None, source=source)
+    # 3. Experience Parsing (Lower Bound, Upper Bound & Range)
+    range_match = re.search(r"(?:between\s+)?(\d+(?:\.\d+)?)\s*(?:to|-|and)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?|yr)", text_lower)
+    max_match = re.search(r"(?:under|less than|at most|up to|maximum|max)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?|yr)", text_lower)
+    min_match = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?|yr)", text_lower)
+
+    if range_match:
+        exp_min = float(range_match.group(1))
+        exp_max = float(range_match.group(2))
+        reqs.experience = ExperienceRequirement(min=exp_min, max=exp_max, source=source)
+    elif max_match:
+        exp_max = float(max_match.group(1))
+        reqs.experience = ExperienceRequirement(min=None, max=exp_max, source=source)
+    elif min_match:
+        exp_min = float(min_match.group(1))
+        reqs.experience = ExperienceRequirement(min=exp_min, max=None, source=source)
 
     # 4. Fresher Status (Categorical work_status, NEVER min_experience=0)
     if "fresher" in text_lower:
@@ -267,16 +283,28 @@ def parse_employer_query(
 
     # 8. Multi-turn Accumulation / Replacement Logic
     if existing_requirements:
+        # Detect explicit clear operations in employer query
+        clear_loc = bool(re.search(r"\b(?:clear|remove|delete)\s+(?:the\s+)?(?:location|city|state|place)\b", text_lower))
+        clear_exp_all = bool(re.search(r"\b(?:clear|remove|delete)\s+(?:the\s+)?experience\s*(?:filter|requirement)?\b", text_lower)) and not ("min" in text_lower or "max" in text_lower or "least" in text_lower or "most" in text_lower)
+        clear_exp_min = bool(re.search(r"\b(?:clear|remove|delete)\s+(?:the\s+)?(?:minimum|min)\s+experience\b", text_lower))
+        clear_exp_max = bool(re.search(r"\b(?:clear|remove|delete)\s+(?:the\s+)?(?:maximum|max)\s+experience\b", text_lower))
+        clear_skills = bool(re.search(r"\b(?:clear|remove|delete)\s+(?:the\s+)?skill[s]?\b", text_lower))
+        clear_role = bool(re.search(r"\b(?:clear|remove|delete)\s+(?:the\s+)?(?:role|title|designation)\b", text_lower))
+
         # Retain or Replace Role
-        if (not reqs.role.value or reqs.role.value in ("Someone", "Developer")) and existing_requirements.role and existing_requirements.role.value:
-            if not ("developer" in text_lower or "analyst" in text_lower or "engineer" in text_lower):
+        if clear_role:
+            reqs.role = None
+        elif existing_requirements.role and existing_requirements.role.value:
+            if not reqs.role or not reqs.role.value or reqs.role.value in ("Someone", "Developer"):
                 reqs.role = ProvenanceValue[str](
                     value=existing_requirements.role.value,
                     source=ProvenanceSource.EXPLICIT_FOLLOWUP,
                 )
 
         # Retain or Replace Location
-        if reqs.location and existing_requirements.location:
+        if clear_loc:
+            reqs.location = None
+        elif reqs.location and existing_requirements.location:
             # Handle Replacement (e.g. city -> country replacement purges city_id)
             if reqs.location.type == "country" or reqs.location.text != existing_requirements.location.text:
                 reqs.location.city_id = None
@@ -291,14 +319,39 @@ def parse_employer_query(
                 source=ProvenanceSource.EXPLICIT_FOLLOWUP,
             )
 
+        # Retain or Replace Skills
+        if clear_skills:
+            reqs.skills = None
+        elif (not reqs.skills or not reqs.skills.value) and existing_requirements.skills:
+            reqs.skills = ProvenanceValue[list](
+                value=existing_requirements.skills.value,
+                source=ProvenanceSource.EXPLICIT_FOLLOWUP,
+            )
 
-
-        # Retain Experience if not explicitly overridden
-        if not reqs.experience and existing_requirements.experience:
+        # Retain or merge Experience bounds
+        if clear_exp_all:
+            reqs.experience = None
+        elif clear_exp_min:
+            prev_max = existing_requirements.experience.max if existing_requirements.experience else None
+            reqs.experience = ExperienceRequirement(min=None, max=prev_max, source=source)
+        elif clear_exp_max:
+            prev_min = existing_requirements.experience.min if existing_requirements.experience else None
+            reqs.experience = ExperienceRequirement(min=prev_min, max=None, source=source)
+        elif not reqs.experience and existing_requirements.experience:
             reqs.experience = ExperienceRequirement(
                 min=existing_requirements.experience.min,
                 max=existing_requirements.experience.max,
                 source=ProvenanceSource.EXPLICIT_FOLLOWUP,
+            )
+        elif reqs.experience and existing_requirements.experience:
+            merged_min = reqs.experience.min if reqs.experience.min is not None else existing_requirements.experience.min
+            merged_max = reqs.experience.max if reqs.experience.max is not None else existing_requirements.experience.max
+            if merged_min is not None and merged_max is not None and merged_min > merged_max:
+                merged_max = None
+            reqs.experience = ExperienceRequirement(
+                min=merged_min,
+                max=merged_max,
+                source=reqs.experience.source or ProvenanceSource.EXPLICIT_FOLLOWUP,
             )
 
     return reqs

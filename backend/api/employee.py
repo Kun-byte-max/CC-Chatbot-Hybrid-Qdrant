@@ -1,5 +1,6 @@
 from typing import Optional, Any, List, Dict, Set
 import logging
+import asyncio
 import re
 import math
 
@@ -9,12 +10,13 @@ try:
     from backend.utils.utils import is_employer_hiring_query
     from backend.services.ranking_service import get_employer_session
     from backend.services.search_client import search_jobs
-    from backend.services.search_parser import parse_search_query, resolve_state_id
+    from backend.services.search_parser import parse_search_query, resolve_state_id, is_self_profile_advice_query
     from backend.services.location_service import resolve_location_from_db, LocationResult
     from backend.services.platform_api import get_closing_soon_jobs, get_nearby_organizations
-    from backend.config.config import MAX_RESULTS, JOB_MATCH_ENABLED
+    from backend.config.config import MAX_RESULTS, JOB_MATCH_ENABLED, HYBRID_SEARCH_ENABLED
     from backend.services import user_data_service
     from backend.services.job_match_client import job_match_client
+    from backend.services.hybrid_job_search import execute_hybrid_job_search
     from backend.recommendation.recommendation_service import recommendation_service
     from backend.recommendation.mappers import to_candidate_profile_from_api
     from backend.utils.session_state import (
@@ -24,9 +26,11 @@ try:
         set_recommendation_session,
         reset_search_context,
         handle_pagination_command,
+        claim_next_pagination_page,
         get_search_context,
         set_search_context,
         update_employee_session_cas,
+        begin_search_generation,
     )
     from backend.services.search_executor import SearchExecutor
     from backend.services.search_planner import SearchPlanner
@@ -35,7 +39,7 @@ except ModuleNotFoundError:
     from utils.utils import is_employer_hiring_query
     from services.ranking_service import get_employer_session
     from services.search_client import search_jobs
-    from services.search_parser import parse_search_query, resolve_state_id
+    from services.search_parser import parse_search_query, resolve_state_id, is_self_profile_advice_query  # type: ignore
     from services.location_service import resolve_location_from_db, LocationResult  # type: ignore
     from services.platform_api import get_closing_soon_jobs, get_nearby_organizations
     from config.config import MAX_RESULTS
@@ -503,7 +507,7 @@ async def handle_employee_context(
     if page_num_match:
         is_pagination_cmd = True
         requested_page = int(page_num_match.group(1))
-    elif re.search(r'\b(?:next\s+page|next\s+jobs|show\s+next|next)\b', msg_lower) and not re.search(r'\b(job|role|developer|analyst|engineer|search|find|php|react|python|java|data)\b', msg_lower):
+    elif re.search(r'\b(?:next\s+page|next\s+jobs|next\s+candidates|show\s+next|show\s+more|more\s+candidates|show\s+more\s+candidates|show\s+me\s+more|more|continue)\b', msg_lower) and not re.search(r'\b(job|role|developer|analyst|engineer|search|find|php|react|python|java|data)\b', msg_lower):
         is_pagination_cmd = True
         if saved_p_state:
             requested_page = saved_p_state.get("current_page", 1) + 1
@@ -521,94 +525,160 @@ async def handle_employee_context(
         set_decision_flags(search_query_found=True, search_executed=True)
 
         cmd_str = f"page {requested_page}" if page_num_match else ("next" if requested_page > saved_p_state.get("current_page", 1) else "prev")
-        handle_pagination_command(
+
+        # Atomically claim the next page under session lock to prevent concurrent duplicate page claims
+        claim_res = claim_next_pagination_page(
             session_id=session_id,
             command=cmd_str,
             role="employee"
         )
-        all_recs = saved_p_state.get("all_recs", [])
-        total_results = len(all_recs) if all_recs else saved_p_state.get("total_results", 0)
-        total_pages = max(1, math.ceil(total_results / MAX_RESULTS))
-        is_oob = requested_page > total_pages
-
-        start_slice = (requested_page - 1) * MAX_RESULTS
-        end_slice = requested_page * MAX_RESULTS
-        page_recs = all_recs[start_slice:end_slice] if not is_oob else []
-
-        try:
-            from backend.schemas.schemas import JobCard
-        except ModuleNotFoundError:
-            from schemas.schemas import JobCard  # type: ignore
-
-        job_cards = []
-        allowed_ids = set()
-        for r in page_recs:
-            j_id = getattr(r, "job_id", None) if hasattr(r, "job_id") else (r.get("job_id") if isinstance(r, dict) else None)
-            if not j_id:
-                continue
-            allowed_ids.add(j_id)
-            raw_job = getattr(r, "raw_data", {}) if hasattr(r, "raw_data") else (r.get("raw_data", {}) if isinstance(r, dict) else {})
-            title = raw_job.get("job_title") or (getattr(r.title_result, "job_title", "Job Title") if hasattr(r, "title_result") else "Job Title")
-            company = raw_job.get("company_name") or "CollarCheck Partner"
-            location = _extract_location(raw_job)
-            exp = raw_job.get("experience_name") or raw_job.get("experience") or "Not specified"
-            mode = raw_job.get("job_mode_name") or "Office"
-            salary = _format_salary(raw_job.get("salary"))
-            raw_desc = raw_job.get("job_description")
-            url = f"https://www.collarcheck.com/jobs-details/{j_id}"
-            match_reason = getattr(r.explanation_result, "summary", "Matched candidate profile") if hasattr(r, "explanation_result") else "Matched candidate profile"
-
-            job_cards.append(JobCard(
-                job_id=j_id,
-                title=title,
-                company=company,
-                department=raw_job.get("department_name") or "General",
-                location=location,
-                job_mode=mode,
-                experience=exp,
-                salary=salary,
-                preview=_clean_preview(raw_desc),
-                description=_clean_description(raw_desc),
-                url=url,
-                match_reason=match_reason,
-            ))
-
-        pag_meta = {
-            "current_page": requested_page,
-            "per_page": MAX_RESULTS,
-            "total_results": total_results,
-            "total_pages": total_pages,
-            "start_index": start_slice + 1 if not is_oob and total_results > 0 else 0,
-            "end_index": min(end_slice, total_results) if not is_oob else 0,
-            "has_next": requested_page < total_pages,
-            "has_prev": requested_page > 1,
-            "invalid_page_num": requested_page if is_oob else None,
-            "all_recs": all_recs,
-        }
-        set_pagination_state(session_id, pag_meta, role="employee")
-
-        if is_oob:
-            db_context_str = f"## PAGINATION\nRequested page {requested_page} is out of bounds (Total pages: {total_pages}).\n\n[INSTRUCTION]\nInform the user page {requested_page} is not available (valid pages 1–{total_pages})."
+        if claim_res.get("success"):
+            requested_page = claim_res["claimed_page"]
+            saved_p_state = claim_res["saved_p_state"]
         else:
-            db_context_str = (
-                f"## PAGINATION RESULT\n"
-                f"Showing page {requested_page} of {total_pages} ({len(job_cards)} jobs).\n"
-                f"The top {len(job_cards)} are ALREADY displayed to the user as interactive cards directly below your message.\n\n"
-                "[INSTRUCTION]\n"
-                f"Write ONE short sentence of framing: 'Showing jobs {pag_meta['start_index']}–{pag_meta['end_index']} of {total_results} matching your skills (Page {requested_page} of {total_pages}).' Do NOT list the jobs."
+            handle_pagination_command(
+                session_id=session_id,
+                command=cmd_str,
+                role="employee"
             )
 
-        orch_res = OrchestrationResult(
-            role="employee",
-            route_branch="PAGINATION",
-            success=True,
-            db_context=db_context_str,
-            results=job_cards,
-            result_type="jobs",
-            allowed_ids=allowed_ids,
-            pagination=pag_meta,
-        )
-        return compose_final_response(orch_res)
+        res_type = saved_p_state.get("result_type", "jobs")
+
+        if res_type == "people":
+            all_recs = saved_p_state.get("all_recs", [])
+            total_results = len(all_recs) if all_recs else saved_p_state.get("total_results", 0)
+            per_page = 5
+            total_pages = max(1, math.ceil(total_results / per_page))
+            is_oob = requested_page > total_pages
+
+            start_slice = (requested_page - 1) * per_page
+            end_slice = requested_page * per_page
+            people_cards = all_recs[start_slice:end_slice] if not is_oob else []
+
+            pag_meta = {
+                "current_page": requested_page,
+                "per_page": per_page,
+                "page_size": per_page,
+                "total_results": total_results,
+                "total_pages": total_pages,
+                "start_index": start_slice + 1 if not is_oob and total_results > 0 else 0,
+                "end_index": min(end_slice, total_results) if not is_oob else 0,
+                "has_next": requested_page < total_pages,
+                "has_prev": requested_page > 1,
+                "invalid_page_num": requested_page if is_oob else None,
+                "result_type": "people",
+                "all_recs": all_recs,
+                "search_gen": saved_p_state.get("search_gen", 1),
+            }
+            set_pagination_state(session_id, pag_meta, role="employee")
+
+            if is_oob:
+                db_context_str = f"## CANDIDATE PAGINATION\nRequested page {requested_page} is out of bounds (Total pages: {total_pages}).\n\n[INSTRUCTION]\nInform the user page {requested_page} is not available (valid pages 1–{total_pages})."
+            else:
+                db_context_str = (
+                    f"## CANDIDATE PAGINATION RESULT\n"
+                    f"Showing page {requested_page} of {total_pages} ({len(people_cards)} professionals).\n"
+                    f"The top {len(people_cards)} are ALREADY displayed to the user as interactive cards directly below your message.\n\n"
+                    "[INSTRUCTION]\n"
+                    f"Write ONE short sentence of framing: 'Showing professionals {pag_meta['start_index']}–{pag_meta['end_index']} of {total_results} matching your criteria (Page {requested_page} of {total_pages}).' Do NOT list the candidates."
+                )
+
+            orch_res = OrchestrationResult(
+                role="employee",
+                route_branch="PEOPLE_PAGINATION",
+                success=True,
+                db_context=db_context_str,
+                results=people_cards,
+                result_type="people",
+                pagination=pag_meta,
+            )
+            return compose_final_response(orch_res)
+        else:
+            all_recs = saved_p_state.get("all_recs", [])
+            total_results = len(all_recs) if all_recs else saved_p_state.get("total_results", 0)
+            total_pages = max(1, math.ceil(total_results / MAX_RESULTS))
+            is_oob = requested_page > total_pages
+
+            start_slice = (requested_page - 1) * MAX_RESULTS
+            end_slice = requested_page * MAX_RESULTS
+            page_recs = all_recs[start_slice:end_slice] if not is_oob else []
+
+            try:
+                from backend.schemas.schemas import JobCard
+            except ModuleNotFoundError:
+                from schemas.schemas import JobCard  # type: ignore
+
+            job_cards = []
+            allowed_ids = set()
+            for r in page_recs:
+                j_id = getattr(r, "job_id", None) if hasattr(r, "job_id") else (r.get("job_id") if isinstance(r, dict) else None)
+                if not j_id:
+                    continue
+                allowed_ids.add(j_id)
+                raw_job = getattr(r, "raw_data", {}) if hasattr(r, "raw_data") else (r.get("raw_data", {}) if isinstance(r, dict) else {})
+                title = raw_job.get("job_title") or (getattr(r.title_result, "job_title", "Job Title") if hasattr(r, "title_result") else "Job Title")
+                company = raw_job.get("company_name") or "CollarCheck Partner"
+                location = _extract_location(raw_job)
+                exp = raw_job.get("experience_name") or raw_job.get("experience") or "Not specified"
+                mode = raw_job.get("job_mode_name") or "Office"
+                salary = _format_salary(raw_job.get("salary"))
+                raw_desc = raw_job.get("job_description")
+                url = f"https://www.collarcheck.com/jobs-details/{j_id}"
+                match_reason = getattr(r.explanation_result, "summary", "Matched candidate profile") if hasattr(r, "explanation_result") else "Matched candidate profile"
+
+                job_cards.append(JobCard(
+                    job_id=j_id,
+                    title=title,
+                    company=company,
+                    department=raw_job.get("department_name") or "General",
+                    location=location,
+                    job_mode=mode,
+                    experience=exp,
+                    salary=salary,
+                    preview=_clean_preview(raw_desc),
+                    description=_clean_description(raw_desc),
+                    url=url,
+                    match_reason=match_reason,
+                ))
+
+            pag_meta = {
+                "current_page": requested_page,
+                "per_page": MAX_RESULTS,
+                "total_results": total_results,
+                "total_pages": total_pages,
+                "start_index": start_slice + 1 if not is_oob and total_results > 0 else 0,
+                "end_index": min(end_slice, total_results) if not is_oob else 0,
+                "has_next": requested_page < total_pages,
+                "has_prev": requested_page > 1,
+                "invalid_page_num": requested_page if is_oob else None,
+                "result_type": "jobs",
+                "all_recs": all_recs,
+                "search_gen": saved_p_state.get("search_gen", 1),
+            }
+            set_pagination_state(session_id, pag_meta, role="employee")
+
+            if is_oob:
+                db_context_str = f"## PAGINATION\nRequested page {requested_page} is out of bounds (Total pages: {total_pages}).\n\n[INSTRUCTION]\nInform the user page {requested_page} is not available (valid pages 1–{total_pages})."
+            else:
+                db_context_str = (
+                    f"## PAGINATION RESULT\n"
+                    f"Showing page {requested_page} of {total_pages} ({len(job_cards)} jobs).\n"
+                    f"The top {len(job_cards)} are ALREADY displayed to the user as interactive cards directly below your message.\n\n"
+                    "[INSTRUCTION]\n"
+                    f"Write ONE short sentence of framing: 'Showing jobs {pag_meta['start_index']}–{pag_meta['end_index']} of {total_results} matching your skills (Page {requested_page} of {total_pages}).' Do NOT list the jobs."
+                )
+
+            orch_res = OrchestrationResult(
+                role="employee",
+                route_branch="PAGINATION",
+                success=True,
+                db_context=db_context_str,
+                results=job_cards,
+                result_type="jobs",
+                allowed_ids=allowed_ids,
+                pagination=pag_meta,
+            )
+            return compose_final_response(orch_res)
 
     # ------------------------------------------------------------------
     # TERMINAL BRANCH 2: RESET
@@ -641,15 +711,25 @@ async def handle_employee_context(
 
     if not ran:
         set_decision_flags(search_query_found=False, search_executed=False)
-    async with stage_timer_async("search_parse"):
-        parsed = await parse_search_query(last_user_msg, "employee", messages, user_location=user_location)
+    parsed_query = kwargs.get("parsed_query")
+    if parsed_query and isinstance(parsed_query, dict):
+        parsed = parsed_query
+    else:
+        async with stage_timer_async("search_parse"):
+            parsed = await parse_search_query(last_user_msg, "employee", messages, user_location=user_location)
 
     # ------------------------------------------------------------------
     # PHASE 10: RAG / KNOWLEDGE RETRIEVAL & GROUNDING BRANCH
     # Rule 0: Structured Search Intent strictly takes precedence over Knowledge Intent.
     # ------------------------------------------------------------------
-    has_active_ctx = bool(get_search_context(session_id, role="employee")) if session_id else False
-    is_search = bool(parsed.get("is_search_intent")) or bool(parsed.get("is_recommendation_intent")) or bool(parsed.get("use_profile_skills")) or bool(parsed.get("job_mode")) or bool(parsed.get("location")) or bool(parsed.get("salary")) or (parsed.get("search_target") in ("JOBS", "PEOPLE_SEARCH", "CANDIDATE_SEARCH")) or (has_active_ctx and bool(parsed.get("clear_filters")))
+    try:
+        from backend.utils.session_state import get_candidate_search_criteria
+    except ModuleNotFoundError:
+        from utils.session_state import get_candidate_search_criteria  # type: ignore
+
+    has_cand_ctx = bool(get_candidate_search_criteria(session_id, role="employee")) if session_id else False
+    has_active_ctx = (bool(get_search_context(session_id, role="employee")) or has_cand_ctx) if session_id else False
+    is_search = bool(parsed.get("is_search_intent")) or bool(parsed.get("is_recommendation_intent")) or bool(parsed.get("use_profile_skills")) or bool(parsed.get("candidate_name")) or bool(parsed.get("job_mode")) or bool(parsed.get("location")) or bool(parsed.get("salary")) or (parsed.get("experience_min") is not None) or (parsed.get("experience_max") is not None) or (parsed.get("search_target") in ("JOBS", "PEOPLE_SEARCH", "CANDIDATE_SEARCH")) or (has_active_ctx and bool(parsed.get("clear_filters")))
     
     is_knowledge = bool(parsed.get("is_knowledge_intent"))
     
@@ -694,22 +774,92 @@ async def handle_employee_context(
     # ------------------------------------------------------------------
     # PHASE 3: PEOPLE SEARCH DELEGATION
     # ------------------------------------------------------------------
+    try:
+        from backend.utils.session_state import get_candidate_search_criteria
+    except ModuleNotFoundError:
+        from utils.session_state import get_candidate_search_criteria  # type: ignore
+
     target_val = parsed.get("search_target")
-    if target_val in ("PEOPLE_SEARCH", getattr(SearchQuery, "SearchTarget", None) and getattr(SearchQuery, "SearchTarget").PEOPLE_SEARCH):
+    has_cand_ctx = bool(get_candidate_search_criteria(session_id, role="employee")) if session_id else False
+
+    # Detect explicit job topic switch (e.g. "Find Python jobs", "developer vacancies", "openings", "jobs with urgent hiring")
+    msg_lower = (last_user_msg or "").lower()
+    job_switch_patterns = [r"\bjobs?\b", r"\bvacanc(?:y|ies)\b", r"\bopenings?\b", r"\bgigs?\b", r"\bpositions?\b"]
+    cand_noun_patterns = [r"\bcandidates?\b", r"\bresumes?\b", r"\bprofiles?\b", r"\bpeople\b", r"\bprofessionals?\b"]
+    cand_switch_patterns = [r"\bcandidates?\b", r"\bresumes?\b", r"\bhire\b", r"\bhiring\b", r"\bprofiles?\b"]
+    has_job_term = any(re.search(p, msg_lower) for p in job_switch_patterns)
+    has_cand_noun = any(re.search(p, msg_lower) for p in cand_noun_patterns)
+    has_cand_term = any(re.search(p, msg_lower) for p in cand_switch_patterns)
+    is_explicit_job_switch = (has_job_term and not has_cand_noun) or (target_val == "JOBS" and not has_cand_noun)
+
+    is_advice = is_self_profile_advice_query(last_user_msg)
+
+    is_people_search = False
+    if not is_advice:
+        if target_val in ("PEOPLE_SEARCH", getattr(SearchQuery, "SearchTarget", None) and getattr(SearchQuery, "SearchTarget").PEOPLE_SEARCH) and not is_explicit_job_switch:
+            is_people_search = True
+        elif has_cand_ctx and not is_explicit_job_switch:
+            is_people_search = True
+
+    if is_people_search:
+        # Candidate search multi-turn state classification:
+        # NEW_SEARCH if new non-overlapping candidate skills are requested with candidate terms.
+        # REFINEMENT for all follow-up refinements when candidate context is active and no job switch requested.
+        prev_cand_ctx = get_candidate_search_criteria(session_id, role="employee") if session_id else None
+        if prev_cand_ctx and has_cand_term and parsed.get("skills"):
+            prev_skills_l = [str(s).lower() for s in (prev_cand_ctx.skills or []) if s]
+            curr_skills_l = [str(s).lower() for s in (parsed.get("skills") or []) if s]
+            if curr_skills_l and prev_skills_l and not any(s in prev_skills_l for s in curr_skills_l):
+                parsed["query_type"] = "NEW_SEARCH"
+            else:
+                parsed["query_type"] = "REFINEMENT"
+        elif has_cand_ctx and not is_explicit_job_switch:
+            parsed["query_type"] = "REFINEMENT"
+
+    if is_people_search:
+        parsed["raw_message"] = last_user_msg
         try:
             from backend.schemas.search_criteria import SearchCriteria
             from backend.services.people_search_service import PeopleSearchService
+            from backend.utils.session_state import (
+                set_candidate_search_criteria,
+                merge_candidate_search_criteria,
+            )
         except ModuleNotFoundError:
             from schemas.search_criteria import SearchCriteria  # type: ignore
             from services.people_search_service import PeopleSearchService  # type: ignore
+            from utils.session_state import (  # type: ignore
+                set_candidate_search_criteria,
+                merge_candidate_search_criteria,
+            )
 
-        criteria = SearchCriteria.from_parsed_dict(parsed)
+        current_criteria = SearchCriteria.from_parsed_dict(parsed)
+        query_type = parsed.get("query_type", "NEW_SEARCH")
+
+        # Multi-turn candidate search context retrieval & refinement merge
+        prev_criteria = get_candidate_search_criteria(session_id, role="employee") if session_id else None
+        if query_type == "REFINEMENT" and prev_criteria:
+            log.info(f"[SESSION_TRACE] candidate_search_state=refined session_id={session_id}")
+            criteria = merge_candidate_search_criteria(prev_criteria, current_criteria, query_type=query_type, parsed_dict=parsed)
+        else:
+            log.info(f"[SESSION_TRACE] candidate_search_state=created session_id={session_id}")
+            criteria = current_criteria
+
+        if session_id:
+            set_candidate_search_criteria(session_id, criteria, role="employee")
+
+        cur_search_gen = begin_search_generation(session_id, role="employee") if session_id else 1
         cur_u_id = int(candidate_id) if candidate_id and str(candidate_id).isdigit() else None
         res_people = PeopleSearchService.search_people(
             criteria=criteria,
             current_user_id=cur_u_id,
             user_location=user_location,
         )
+
+        pag_info = res_people.get("pagination")
+        if pag_info and session_id:
+            pag_info["search_gen"] = cur_search_gen
+            set_pagination_state(session_id, pag_info, role="employee")
 
         orch_res = OrchestrationResult(
             role="employee",
@@ -718,7 +868,7 @@ async def handle_employee_context(
             db_context=res_people.get("db_context"),
             results=res_people.get("results"),
             result_type=res_people.get("result_type", "people"),
-            pagination=res_people.get("pagination"),
+            pagination=pag_info,
             raw_hits=res_people.get("raw_hits", []),
             suggestion_chips=res_people.get("suggestion_chips"),
         )
@@ -735,6 +885,7 @@ async def handle_employee_context(
         salary_max=parsed.get("salary_max"),
         work_mode=parsed.get("job_mode"),
         company=parsed.get("company"),
+        urgent=parsed.get("urgent"),
         clear_filters=parsed.get("clear_filters"),
     )
 
@@ -748,18 +899,34 @@ async def handle_employee_context(
     if existing_title and new_kw:
         is_related_title = any(w in new_kw for w in existing_title.split()) or any(w in existing_title for w in new_kw.split())
 
-    # OVERRIDE replaces single-valued title while preserving location/work_mode/salary; RESET wipes all criteria for an unrelated domain search
-    if new_kw and not (is_related_title or "in " in msg_l or "only " in msg_l or "with " in msg_l or "mein" in msg_l or "wale" in msg_l):
+    # OVERRIDE replaces single-valued title while preserving location/work_mode/salary; RESET wipes all criteria for an unrelated domain search or NEW_SEARCH
+    q_type = parsed.get("query_type")
+    _is_profile_turn = bool(parsed.get("use_profile_skills") or parsed.get("skill_source") == "PROFILE")
+    if _is_profile_turn and not new_kw and not parsed.get("job_mode") and not parsed.get("location") and not parsed.get("urgent"):
+        prompt_cat = "RESET"
+    elif _is_profile_turn and not new_kw:
+        prompt_cat = "ADDITIVE"
+    elif q_type == "NEW_SEARCH" or (new_kw and not (is_related_title or "in " in msg_l or "only " in msg_l or "with " in msg_l or "mein" in msg_l or "wale" in msg_l)):
         prompt_cat = "RESET"
     elif new_kw and is_related_title:
         prompt_cat = "OVERRIDE"
     else:
         prompt_cat = "ADDITIVE"
+    cur_job_search_gen = begin_search_generation(session_id, role="employee") if session_id else 1
     if session_id:
         try:
             active_state = update_employee_session_cas(session_id, turn_sq, prompt_category=prompt_cat, role="employee")
             raw_merged_ctx = active_state.get("search_context") if isinstance(active_state, dict) else None
-            if raw_merged_ctx and isinstance(raw_merged_ctx, dict):
+            ctx_dict = {}
+            if raw_merged_ctx:
+                if isinstance(raw_merged_ctx, dict):
+                    ctx_dict = raw_merged_ctx
+                elif hasattr(raw_merged_ctx, "model_dump"):
+                    ctx_dict = raw_merged_ctx.model_dump()
+                elif hasattr(raw_merged_ctx, "dict"):
+                    ctx_dict = raw_merged_ctx.dict()
+
+            if ctx_dict:
                 _near_me_turn = (
                     parsed.get("location_source") == "CURRENT"
                     or parsed.get("location_mode") == "NEAR_ME"
@@ -772,19 +939,21 @@ async def handle_employee_context(
                 _is_profile_skill_turn = bool(parsed.get("use_profile_skills") or parsed.get("skill_source") == "PROFILE")
 
                 if not _is_profile_skill_turn:
-                    if raw_merged_ctx.get("title") and not parsed.get("keyword"):
-                        parsed["keyword"] = raw_merged_ctx.get("title")
-                    if raw_merged_ctx.get("skills") and not parsed.get("skills"):
-                        parsed["skills"] = raw_merged_ctx.get("skills")
+                    if ctx_dict.get("title") and not parsed.get("keyword"):
+                        parsed["keyword"] = ctx_dict.get("title")
+                    if ctx_dict.get("skills") and not parsed.get("skills"):
+                        parsed["skills"] = ctx_dict.get("skills")
 
-                if raw_merged_ctx.get("location") and not parsed.get("location") and not _near_me_turn and not _is_profile_skill_turn:
-                    parsed["location"] = raw_merged_ctx.get("location")
-                if raw_merged_ctx.get("work_mode") and not parsed.get("job_mode"):
-                    parsed["job_mode"] = raw_merged_ctx.get("work_mode")
-                if raw_merged_ctx.get("salary_min") and not parsed.get("salary_min"):
-                    parsed["salary_min"] = raw_merged_ctx.get("salary_min")
-                if raw_merged_ctx.get("salary_max") and not parsed.get("salary_max"):
-                    parsed["salary_max"] = raw_merged_ctx.get("salary_max")
+                if ctx_dict.get("location") and not parsed.get("location") and not _near_me_turn and not _is_profile_skill_turn:
+                    parsed["location"] = ctx_dict.get("location")
+                if ctx_dict.get("work_mode") and not parsed.get("job_mode"):
+                    parsed["job_mode"] = ctx_dict.get("work_mode")
+                if ctx_dict.get("salary_min") and not parsed.get("salary_min"):
+                    parsed["salary_min"] = ctx_dict.get("salary_min")
+                if ctx_dict.get("salary_max") and not parsed.get("salary_max"):
+                    parsed["salary_max"] = ctx_dict.get("salary_max")
+                if ctx_dict.get("urgent") is not None and parsed.get("urgent") is None:
+                    parsed["urgent"] = ctx_dict.get("urgent")
         except Exception as st_ex:
             log.warning("Session state merge error in employee context: %s", st_ex)
 
@@ -802,19 +971,77 @@ async def handle_employee_context(
 
         has_explicit_query_criteria = bool(keyword or skills)
 
-        # Profile Fetching
+        # Profile & Employment Skill Fetching
+        _is_profile_turn = bool(parsed.get("use_profile_skills") or parsed.get("skill_source") == "PROFILE")
         prof_data = user_profile_api_data
-        if not prof_data:
-            try:
-                prof_data = await run_in_threadpool(
-                    user_data_service.fetch_endpoint_data,
-                    "user-profile",
-                    token=token,
-                    user_slug=user_slug,
-                    user_id=str(candidate_id or "")
-                )
-            except Exception as p_ex:
-                log.warning("Failed to fetch API profile: %s", p_ex)
+        emp_data = None
+
+        if _is_profile_turn:
+            if not prof_data:
+                try:
+                    prof_task = run_in_threadpool(
+                        user_data_service.fetch_endpoint_data,
+                        "user-profile",
+                        token=token,
+                        user_slug=user_slug,
+                        user_id=str(candidate_id or "")
+                    )
+                    emp_task = run_in_threadpool(
+                        user_data_service.fetch_endpoint_data,
+                        "allEmployementNew",
+                        token=token,
+                        user_id=str(candidate_id or "")
+                    )
+                    p_res, e_res = await asyncio.gather(prof_task, emp_task, return_exceptions=True)
+                    prof_data = p_res if (isinstance(p_res, dict) and not isinstance(p_res, Exception)) else None
+                    emp_data = e_res if (isinstance(e_res, dict) and not isinstance(e_res, Exception)) else None
+                except Exception as gather_ex:
+                    log.warning("Failed concurrent profile/employment fetch: %s", gather_ex)
+
+                if not prof_data:
+                    try:
+                        prof_data = await run_in_threadpool(
+                            user_data_service.fetch_endpoint_data,
+                            "user-profile",
+                            token=token,
+                            user_slug=user_slug,
+                            user_id=str(candidate_id or "")
+                        )
+                    except Exception as p_ex:
+                        log.warning("Failed fallback fetch for user-profile: %s", p_ex)
+
+                if not emp_data:
+                    try:
+                        emp_data = await run_in_threadpool(
+                            user_data_service.fetch_endpoint_data,
+                            "allEmployementNew",
+                            token=token,
+                            user_id=str(candidate_id or "")
+                        )
+                    except Exception as e_ex:
+                        log.warning("Failed fallback fetch for allEmployementNew: %s", e_ex)
+            else:
+                try:
+                    emp_data = await run_in_threadpool(
+                        user_data_service.fetch_endpoint_data,
+                        "allEmployementNew",
+                        token=token,
+                        user_id=str(candidate_id or "")
+                    )
+                except Exception as e_ex:
+                    log.warning("Failed to fetch employment history for skills: %s", e_ex)
+        else:
+            if not prof_data:
+                try:
+                    prof_data = await run_in_threadpool(
+                        user_data_service.fetch_endpoint_data,
+                        "user-profile",
+                        token=token,
+                        user_slug=user_slug,
+                        user_id=str(candidate_id or "")
+                    )
+                except Exception as p_ex:
+                    log.warning("Failed to fetch API profile: %s", p_ex)
 
         if not prof_data and kwargs.get("user_detail"):
             prof_data = kwargs.get("user_detail")
@@ -825,6 +1052,22 @@ async def handle_employee_context(
             user_id=int(candidate_id) if candidate_id and str(candidate_id).isdigit() else None,
             fallback_skills=user_skills
         )
+
+        if _is_profile_turn:
+            try:
+                from backend.services.user_skill_aggregator import aggregate_user_skills
+            except ModuleNotFoundError:
+                from services.user_skill_aggregator import aggregate_user_skills  # type: ignore
+
+            aggregated_res = aggregate_user_skills(
+                user_profile_data=prof_data_dict if prof_data_dict else None,
+                employment_data=emp_data if isinstance(emp_data, dict) else None,
+                profile_status="FAILED" if prof_data and not prof_data_dict.get("status") else None,
+                employment_status="FAILED" if emp_data and not (isinstance(emp_data, dict) and emp_data.get("status")) else None,
+            )
+            if aggregated_res.effective_skills and candidate_prof:
+                candidate_prof.skills = aggregated_res.effective_skills
+                candidate_prof.skill_provenance = aggregated_res.provenance
 
         has_valid_profile = bool(prof_data_dict.get("status") and candidate_prof and (candidate_prof.skills or candidate_prof.current_title or candidate_prof.name))
         set_decision_flags(profile_retrieved=has_valid_profile)
@@ -843,6 +1086,10 @@ async def handle_employee_context(
             used_profile_fallback = True
             if candidate_prof.skills:
                 profile_skills_for_fallback = candidate_prof.skills
+            if candidate_prof.current_title:
+                profile_roles_for_fallback = [candidate_prof.current_title]
+        elif _is_profile_turn and candidate_prof and candidate_prof.skills:
+            profile_skills_for_fallback = candidate_prof.skills
             if candidate_prof.current_title:
                 profile_roles_for_fallback = [candidate_prof.current_title]
 
@@ -941,6 +1188,8 @@ async def handle_employee_context(
             job_mode_id = 1
         elif "hybrid" in mode_str:
             job_mode_id = 3
+        elif "field" in mode_str:
+            job_mode_id = 4
 
         if job_mode_id:
             base_filters["job_mode"] = [job_mode_id]
@@ -951,22 +1200,32 @@ async def handle_employee_context(
         if exp_ids:
             base_filters["experience"] = exp_ids
 
-        # Job Match Integration Branch
+        # Hybrid Search Layer Integration Branch
+        hybrid_executed = False
         used_job_match_flag = False
-        if JOB_MATCH_ENABLED and candidate_id and str(candidate_id).isdigit() and (used_profile_fallback or parsed.get("use_profile_skills") or parsed.get("is_recommendation_intent")):
+        if HYBRID_SEARCH_ENABLED and not has_explicit_unresolved_location and not current_loc_missing:
             try:
-                page_recs, pagination_meta, all_recs, used_job_match_flag = await recommendation_service.get_job_match_recommendations_async(
-                    candidate_id=int(candidate_id),
+                hits, hybrid_meta = await execute_hybrid_job_search(
+                    last_user_msg=last_user_msg,
+                    candidate_id=candidate_id,
                     candidate_profile=candidate_prof if candidate_prof else None,
-                    session_id=session_id,
-                    page=1,
-                    per_page=MAX_RESULTS,
+                    keyword=keyword,
+                    base_filters=base_filters,
+                    parsed=parsed,
+                    used_profile_fallback=used_profile_fallback,
+                    profile_terms=(profile_skills_for_fallback + profile_roles_for_fallback),
+                    explicit_loc=explicit_loc,
+                    target_city_name=loc_res.city_name if loc_res.resolved else resolved_raw_loc,
+                    target_state_name=loc_res.state_name if loc_res.resolved else None,
+                    limit=MAX_RESULTS * 2,
                 )
-            except Exception as jm_err:
-                log.warning("[JobMatch] Async recommendation call failed in employee context (%s). Using fallback.", jm_err)
+                hybrid_executed = True
                 used_job_match_flag = False
+            except Exception as h_err:
+                log.warning("[HybridSearch] Hybrid search execution failed (%s). Falling back to legacy pipeline.", h_err)
+                hybrid_executed = False
 
-        if not used_job_match_flag:
+        if not hybrid_executed and not used_job_match_flag:
             # Retrieval Phase
             hits = []
             if has_explicit_unresolved_location:
@@ -985,10 +1244,16 @@ async def handle_employee_context(
                 )
                 return compose_final_response(orch_res)
             elif used_profile_fallback and not keyword:
-                clean_terms = [t for t in (profile_skills_for_fallback + profile_roles_for_fallback) if t]
+                try:
+                    from backend.services.user_skill_aggregator import select_balanced_retrieval_terms
+                except ModuleNotFoundError:
+                    from services.user_skill_aggregator import select_balanced_retrieval_terms  # type: ignore
+
+                raw_terms = profile_skills_for_fallback + profile_roles_for_fallback
+                prov_list = getattr(candidate_prof, "skill_provenance", None) if candidate_prof else None
+                clean_terms = select_balanced_retrieval_terms(raw_terms, provenance=prov_list, limit=15)
                 if clean_terms:
-                    import asyncio
-                    tasks = [search_jobs(keyword=t, **base_filters) for t in clean_terms[:10]]
+                    tasks = [search_jobs(keyword=t, **base_filters) for t in clean_terms]
                     results_list = await asyncio.gather(*tasks, return_exceptions=True)
                     merged_hits = []
                     seen_ids = set()
@@ -1050,33 +1315,35 @@ async def handle_employee_context(
                 )
                 return compose_final_response(orch_res)
 
-            # Deduplicate hits without re-sorting (Authoritative Phase 2 Ranking Ownership)
-            valid_hits = []
-            seen_ids = set()
-            for h in hits:
-                try:
-                    j_id = int(h.get("id"))
-                except (TypeError, ValueError):
-                    continue
-                if j_id not in seen_ids:
-                    seen_ids.add(j_id)
-                    h["_job_id"] = j_id
-                    valid_hits.append(h)
+        # Deduplicate hits without re-sorting (Authoritative Phase 2 Ranking Ownership)
+        valid_hits = []
+        seen_ids = set()
+        for h in hits:
+            try:
+                j_id = int(h.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if j_id not in seen_ids:
+                seen_ids.add(j_id)
+                h["_job_id"] = j_id
+                valid_hits.append(h)
 
-            search_query_term = keyword.strip() if keyword else None
-            page_recs, pagination_meta, all_recs = recommendation_service.get_paginated_recommendations_for_profile(
-                candidate_prof if candidate_prof else None,
-                jobs=valid_hits,
-                page=1,
-                per_page=MAX_RESULTS,
-                session_id=session_id,
-                job_mode=job_mode_id,
-                city_id=loc_res.city_id if loc_res.resolved else None,
-                search_query_title=search_query_term,
-                search_query_location=(loc_res.city_name or loc_res.state_name or resolved_raw_loc) if explicit_loc else None,
-            )
+        search_query_term = keyword.strip() if keyword else None
+        page_recs, pagination_meta, all_recs = recommendation_service.get_paginated_recommendations_for_profile(
+            candidate_prof if candidate_prof else None,
+            jobs=valid_hits,
+            page=1,
+            per_page=MAX_RESULTS,
+            session_id=session_id,
+            job_mode=job_mode_id,
+            city_id=loc_res.city_id if loc_res.resolved else None,
+            search_query_title=search_query_term,
+            search_query_location=(loc_res.city_name or loc_res.state_name or resolved_raw_loc) if explicit_loc else None,
+        )
 
         pagination_meta["all_recs"] = all_recs
+        pagination_meta["search_gen"] = cur_job_search_gen
+        pagination_meta["_is_fresh_init"] = True
         set_pagination_state(session_id, pagination_meta, role="employee")
 
         try:
@@ -1125,6 +1392,7 @@ async def handle_employee_context(
                 match_reason=match_reason,
                 global_rank=i,
                 match_score=score_val,
+                urgent=raw_job.get("urgent"),
             )
             job_cards.append(job_card)
             if i <= MAX_RESULTS:
@@ -1151,10 +1419,7 @@ async def handle_employee_context(
             "## JOB SEARCH RESULT SUMMARY",
             f"The search{location_label} returned {display_total} matching job(s). "
             f"The top {min(MAX_RESULTS, len(job_cards))} are ALREADY displayed to the user as interactive cards directly below your message.",
-            "",
-            "Titles retrieved (for your awareness only — do NOT repeat them):",
         ]
-        parts.extend(compact_lines)
         example_sentence = f"I found {display_total} roles matching your criteria — here are the top matches."
         parts.append(
             "\n[MANDATORY AI INSTRUCTION]\n"

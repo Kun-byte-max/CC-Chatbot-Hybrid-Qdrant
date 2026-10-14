@@ -148,6 +148,7 @@ async def handle_employer_context(
             reset_search_context,
             handle_pagination_command,
             get_pagination_state,
+            begin_search_generation,
         )
         from backend.services.employer_search_parser import parse_employer_query
         from backend.services.employer_search_executor import execute_employer_candidate_search
@@ -162,6 +163,7 @@ async def handle_employer_context(
             reset_search_context,
             handle_pagination_command,
             get_pagination_state,
+            begin_search_generation,
         )
         from services.employer_search_parser import parse_employer_query  # type: ignore
         from services.employer_search_executor import execute_employer_candidate_search  # type: ignore
@@ -207,12 +209,14 @@ async def handle_employer_context(
                     if not raw_hits and saved_p_state and saved_p_state.get("all_candidates"):
                         raw_hits = saved_p_state.get("all_candidates")
                     if raw_hits:
+                        emp_search_gen = saved_p_state.get("search_gen", 1) if saved_p_state else 1
                         page_recs, pag_meta_dict, all_recs = recommendation_service.get_paginated_employer_candidate_recommendations(
                             employer_reqs=reqs,
                             candidates=raw_hits,
                             page=max(1, requested_page),
                             per_page=MAX_RESULTS,
                             session_id=session_id,
+                            search_gen=emp_search_gen,
                         )
                         cands_by_id = {str(h.get("id") or h.get("user_id") or h.get("ccid") or i): h for i, h in enumerate(raw_hits, 1)}
                         all_formatted_card_dicts = EmployerResponseFormatter.format_candidate_cards(all_recs, cands_by_id)
@@ -270,7 +274,7 @@ async def handle_employer_context(
                             role="employer",
                             route_branch="PAGINATION",
                             db_context=db_context_str,
-                            results=page_cards if page_cards else all_candidate_cards[:MAX_RESULTS],
+                            results=all_candidate_cards,
                             result_type="candidates",
                             allowed_ids=allowed_ids,
                             raw_hits=raw_hits,
@@ -299,9 +303,11 @@ async def handle_employer_context(
 
     # -------------------------------------------------------------------------
     # -------------------------------------------------------------------------
-    # PHASE 10: RAG / KNOWLEDGE RETRIEVAL & GROUNDING BRANCH (EMPLOYER ROLE)
-    # -------------------------------------------------------------------------
-    parsed_k = await parse_search_query(last_user_msg, "employer", user_location=None)
+    parsed_query = kwargs.get("parsed_query")
+    if parsed_query and isinstance(parsed_query, dict):
+        parsed_k = parsed_query
+    else:
+        parsed_k = await parse_search_query(last_user_msg, "employer", user_location=None)
     is_knowledge = bool(parsed_k.get("is_knowledge_intent"))
     
     # Step 3a. Recover session context
@@ -314,7 +320,12 @@ async def handle_employer_context(
             log.warning(f"Failed to parse existing employer requirements: {e}")
 
     # Step 3b. Parse query delta into canonical EmployerSearchRequirements
-    reqs = parse_employer_query(last_user_msg, existing_requirements=existing_reqs, user_location=user_location)
+    reqs = parse_employer_query(
+        last_user_msg,
+        existing_requirements=existing_reqs,
+        user_location=user_location,
+        parsed_llm=parsed_query if (parsed_query and isinstance(parsed_query, dict)) else None,
+    )
     
     prof_api_data = kwargs.get("user_profile_api_data")
     if not reqs.location and prof_api_data and isinstance(prof_api_data, dict):
@@ -374,6 +385,9 @@ async def handle_employer_context(
 
     # Step 3c. Phase 5 Atomic CAS Session Persistence
     update_employer_session_cas(session_id, reqs, prompt_category="ADDITIVE", role="employer")
+
+    # Step 3c-gen. Capture new search generation atomically prior to slow network/retrieval execution
+    cur_employer_search_gen = begin_search_generation(session_id, role="employer") if session_id else 1
 
     # Step 3d. Search Execution
     try:
@@ -435,6 +449,7 @@ async def handle_employer_context(
         page=max(1, requested_page),
         per_page=MAX_RESULTS,
         session_id=session_id,
+        search_gen=cur_employer_search_gen,
     )
 
     cands_by_id = {str(h.get("id") or h.get("user_id") or h.get("ccid") or i): h for i, h in enumerate(raw_hits, 1)}
@@ -512,7 +527,7 @@ async def handle_employer_context(
         role="employer",
         route_branch="SEARCH",
         db_context=db_context_str,
-        results=page_cards if page_cards else all_candidate_cards[:MAX_RESULTS],
+        results=all_candidate_cards,
         result_type="candidates",
         allowed_ids=allowed_ids,
         raw_hits=raw_hits,

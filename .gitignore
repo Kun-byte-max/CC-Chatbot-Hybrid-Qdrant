@@ -36,3 +36,16 @@ baseline_request_ids.txt
 baseline_analysis.txt
 baseline_uninstrumented_main.py
 baseline_instrumented_main.py
+
+# Scratch & Diagnostic Artifacts
+scratch/
+.cursor/
+*results.json
+*_results.json
+phase*_performance_results.json
+verification_results.json
+
+# Coverage & Profiling
+.coverage
+htmlcov/
+*.prof

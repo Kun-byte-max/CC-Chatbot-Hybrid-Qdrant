@@ -71,6 +71,21 @@ def extract_employer_job_profile(user_message: str) -> str:
     return profile if profile else "Backend Developer"
 
 def get_suggested_skills(job_profile: str) -> list:
+    dyn_skills = JobRepository.get_dynamic_job_profile_skills if hasattr(JobRepository, "get_dynamic_job_profile_skills") else None
+    if dyn_skills:
+        fetched = dyn_skills(job_profile)
+        if fetched:
+            return fetched
+
+    # Dynamic helper fallback from job_repository function if importable
+    try:
+        from backend.repositories.job_repository import get_dynamic_job_profile_skills
+        fetched = get_dynamic_job_profile_skills(job_profile)
+        if fetched:
+            return fetched
+    except Exception:
+        pass
+
     prof_lower = (job_profile or "").lower()
     for k, skills in JOB_PROFILE_SKILLS_MAP.items():
         if k.lower() in prof_lower or prof_lower in k.lower():

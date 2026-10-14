@@ -40,12 +40,14 @@ class PeopleRepository:
         state_id: Optional[int] = None,
         company: Optional[str] = None,
         exclude_user_id: Optional[int] = None,
+        name: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         """
         Executes database SQL search for matching people profiles using AND conditions.
         - Title matching: Current designation only (cyb_designation via current experience e.still_working = 1 or latest e.id).
         - Company matching: Current company only (via current experience e.still_working = 1 or latest e.id).
+        - Name matching: Case-insensitive match on fname, lname, or full name.
         - Current user exclusion: Excludes exclude_user_id from results.
         """
         conn = get_db()
@@ -59,6 +61,7 @@ class PeopleRepository:
                     u.lname, 
                     u.city, 
                     u.state, 
+                    u.profile,
                     0.0 as total_experience_years,
                     ct.name as city_name, 
                     st.name as state_name, 
@@ -92,6 +95,19 @@ class PeopleRepository:
                   AND u.status = 1 
                   AND (u.is_deleted IS NULL OR u.is_deleted = 0)
             """
+
+            # Name Filter (AND condition) - Full name, First name, Last name matching
+            if name and name.strip():
+                clean_name = name.strip().lower()
+                query += """
+                    AND (
+                        LOWER(u.fname) LIKE %s
+                        OR LOWER(u.lname) LIKE %s
+                        OR LOWER(CONCAT(COALESCE(u.fname, ''), ' ', COALESCE(u.lname, ''))) LIKE %s
+                    )
+                """
+                pattern = f"%{clean_name}%"
+                params.extend([pattern, pattern, pattern])
 
             # Exclude current authenticated user
             if exclude_user_id is not None:
@@ -198,6 +214,7 @@ class PeopleRepository:
                     p_id = r["id"]
                     fname = r.get("fname") or ""
                     lname = r.get("lname") or ""
+                    raw_profile = r.get("profile")
                     c_name = r.get("city_name") or str(r.get("city") or "")
                     s_name = r.get("state_name") or str(r.get("state") or "")
                     country_name = r.get("country_name") or ""
@@ -205,9 +222,16 @@ class PeopleRepository:
                     p_id = r[0]
                     fname = r[1] or ""
                     lname = r[2] or ""
-                    c_name = r[5] or str(r[3] or "")
-                    s_name = r[6] or str(r[4] or "")
-                    country_name = r[7] or ""
+                    if len(r) >= 10:
+                        raw_profile = r[5]
+                        c_name = r[7] or str(r[3] or "")
+                        s_name = r[8] or str(r[4] or "")
+                        country_name = r[9] or ""
+                    else:
+                        raw_profile = None
+                        c_name = r[5] if len(r) > 5 else str(r[3] or "")
+                        s_name = r[6] if len(r) > 6 else str(r[4] or "")
+                        country_name = r[7] if len(r) > 7 else ""
 
                 if p_id in seen_ids:
                     continue
@@ -224,7 +248,7 @@ class PeopleRepository:
 
                 user_skills = PeopleRepository._get_user_skills(cursor, p_id)
 
-                tot_exp = r.get("total_experience_years") if isinstance(r, dict) else (r[5] if len(r) > 8 else 0.0)
+                tot_exp = r.get("total_experience_years") if isinstance(r, dict) else (r[6] if len(r) > 6 else 0.0)
                 try:
                     tot_exp = float(tot_exp) if tot_exp is not None else 0.0
                 except (ValueError, TypeError):
@@ -243,6 +267,7 @@ class PeopleRepository:
                     "country": country_name,
                     "skills": user_skills,
                     "total_experience_years": tot_exp,
+                    "profile": raw_profile,
                 })
 
                 if len(people) >= limit:

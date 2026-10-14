@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+from typing import Optional, List, Any
 import os
 import re
 import sys
@@ -15,9 +15,15 @@ for p in [str(backend_dir), str(project_root)]:
 
 from backend.config.config import MODEL
 from backend.schemas.schemas import ChatRequest, ChatResponse
-from backend.repositories.db import get_db
 from backend.api.auth import router as auth_router, verify_token, request_role, request_email, get_current_user
 from backend.api.profile import router as profile_router
+from backend.api.search import router as search_router, DB_DSN, _partial_sync_loop, _full_sync_loop
+try:
+    from backend.repositories.db import get_db
+except ModuleNotFoundError:
+    from repositories.db import get_db  # type: ignore
+from contextlib import asynccontextmanager
+import asyncio
 from backend.api.employer import check_employer_access, handle_employer_context
 from backend.api.employee import check_employee_access, handle_employee_context
 from backend.services.llm_service import LLMService
@@ -108,7 +114,38 @@ ALLOWED_PROFILE_COLUMNS = {
     "profile_description": "profile_description"
 }
 
-app = FastAPI(title="CollarCheck AI Chatbot")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("Starting up CollarCheck AI Chatbot service...")
+    try:
+        import aiomysql
+        app.state.db_pool = await aiomysql.create_pool(
+            minsize=2,
+            maxsize=10,
+            **DB_DSN,
+        )
+        log.info("Meilisearch DB pool initialized.")
+        partial_task = asyncio.create_task(_partial_sync_loop())
+        full_task = asyncio.create_task(_full_sync_loop())
+    except Exception as e:
+        log.warning("Search DB pool startup skipped: %s", e)
+        partial_task = None
+        full_task = None
+
+    yield
+
+    if partial_task:
+        partial_task.cancel()
+    if full_task:
+        full_task.cancel()
+    db_pool = getattr(app.state, "db_pool", None)
+    if db_pool:
+        db_pool.close()
+        await db_pool.wait_closed()
+        log.info("Meilisearch DB pool closed.")
+
+
+app = FastAPI(title="CollarCheck AI Chatbot", lifespan=lifespan)
 
 cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080,http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://localhost:8001,http://127.0.0.1:8000,http://127.0.0.1:8001")
 origins = [o.strip() for o in cors_env.split(",") if o.strip() and o.strip() not in ("*", "null")]
@@ -121,9 +158,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include Authentication Router
+# Include Routers
 app.include_router(auth_router)
 app.include_router(profile_router)
+app.include_router(search_router)
+
 
 @app.get("/api/response/employee/user-detail")
 async def get_user_details(req: Request, current_user: Optional[dict] = Depends(get_current_user)):
@@ -142,21 +181,17 @@ async def get_user_details(req: Request, current_user: Optional[dict] = Depends(
             token = header_token.replace("Bearer ", "").strip()
 
     if not uid:
-        uid = req.headers.get("X-User-Id") or os.getenv("PLATFORM_TEST_USER_ID", "19")
-
-    if not token:
-        token = os.getenv("PLATFORM_TEST_TOKEN", "")
+        uid = req.headers.get("X-User-Id") or ""
 
     auth_header = token if (not token or token.startswith("Bearer ")) else f"Bearer {token}"
 
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Authorization": auth_header,
-        "X-Auth-Token": token.replace("Bearer ", ""),
-        "X-User-Id": str(uid or "19"),
+        "X-Auth-Token": token.replace("Bearer ", "") if token else "",
+        "X-User-Id": str(uid or ""),
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
-
 
     base_url = os.getenv("PLATFORM_API_BASE", "https://admin.collarcheck.com/wapi").rstrip("/")
     try:
@@ -165,24 +200,17 @@ async def get_user_details(req: Request, current_user: Optional[dict] = Depends(
             res = await client.get(f"{base_url}/employee/user-detail", headers=headers)
             if res.status_code == 200:
                 return res.json()
-
-            # If staging user-detail returns 401, fetch API profile data via user slug
-            user_slug_val = (current_user.get("slug") if current_user else None) or req.headers.get("X-User-Slug")
-            if user_slug_val:
-                admin_tok = os.getenv("PLATFORM_ADMIN_TOKEN", "")
-                admin_headers = {
-                    "Accept": "application/json, text/plain, */*",
-                    "Authorization": admin_tok if admin_tok.startswith("Bearer ") else f"Bearer {admin_tok}",
-                    "X-Auth-Token": admin_tok.replace("Bearer ", ""),
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            elif res.status_code in (401, 403):
+                log.warning("External user-detail returned HTTP %d for user %s. Failing closed.", res.status_code, uid)
+                return {
+                    "status": False,
+                    "message": "External user details unauthorized or unavailable",
+                    "data": None
                 }
-                res_profile = await client.get(f"{base_url}/auth/user-profile/{user_slug_val}", headers=admin_headers)
-                if res_profile.status_code == 200:
-                    return res_profile.json()
     except Exception as e:
         log.warning("Failed to fetch external user details from collarcheck: %s", e)
 
-    # Fallback to local DB record if external API is unreachable or unauthorized
+    # Fallback to local DB record ONLY if external API is unreachable / network exception
     if current_user:
         return {
             "status": True,
@@ -218,10 +246,7 @@ async def get_random_widget_endpoint(req: Request):
         log.warning("User resolution in get_random_widget_endpoint failed: %s", ex)
 
     if not uid:
-        uid = req.headers.get("X-User-Id") or os.getenv("PLATFORM_TEST_USER_ID", "200014")
-
-    if not token:
-        token = os.getenv("PLATFORM_TEST_TOKEN", "") or ""
+        uid = req.headers.get("X-User-Id") or ""
 
     clean_token_str = token.replace("Bearer ", "").strip() if token else ""
     auth_header = token if (not token or token.startswith("Bearer ")) else f"Bearer {token}"
@@ -230,34 +255,21 @@ async def get_random_widget_endpoint(req: Request):
         "Accept": "application/json, text/plain, */*",
         "Authorization": auth_header,
         "X-Auth-Token": clean_token_str,
-        "X-User-Id": str(uid or "200014"),
+        "X-User-Id": str(uid or ""),
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
 
+    base_url = os.getenv("PLATFORM_API_BASE", "https://admin.collarcheck.com/wapi").rstrip("/")
     try:
         import httpx
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            res = await client.get("https://admin.collarcheck.com/wapi/random-widget", headers=headers)
+            res = await client.get(f"{base_url}/random-widget", headers=headers)
             if res.status_code == 200:
                 return res.json()
-
-            # Always retry with PLATFORM_ADMIN_TOKEN if initial request returns non-200
-            admin_tok = os.getenv("PLATFORM_ADMIN_TOKEN", "")
-            if admin_tok:
-                admin_headers = {
-                    "Accept": "application/json, text/plain, */*",
-                    "Authorization": admin_tok if admin_tok.startswith("Bearer ") else f"Bearer {admin_tok}",
-                    "X-Auth-Token": admin_tok.replace("Bearer ", ""),
-                    "X-User-Id": str(uid or "200014"),
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                }
-                res_admin = await client.get("https://admin.collarcheck.com/wapi/random-widget", headers=admin_headers)
-                if res_admin.status_code == 200:
-                    return res_admin.json()
     except Exception as e:
         log.warning("Failed to fetch external random widget: %s", e)
 
-    # Fallback to DB widgets if external API is unavailable
+    # Fallback to DB widgets if external API is unavailable or returns non-200
     try:
         from backend.services.user_data_service import _get_random_widgets_fallback
         return _get_random_widgets_fallback()
@@ -284,7 +296,7 @@ async def get_admin_user_profile_endpoint(req: Request, user_slug: Optional[str]
 
     slug = user_slug or req.query_params.get("user_slug") or req.headers.get("X-User-Slug")
     
-    # If no slug provided OR if slug is the legacy default 'rakesh-maurya-cce130000', replace with logged in user's DB slug
+    # If no slug provided OR if slug is legacy default 'rakesh-maurya-cce130000', replace with logged in user's DB slug
     if (not slug or slug == "rakesh-maurya-cce130000") and db_user and db_user.get("slug"):
         slug = db_user.get("slug")
 
@@ -301,7 +313,8 @@ async def get_admin_user_profile_endpoint(req: Request, user_slug: Optional[str]
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
 
-    target_url = f"https://admin.collarcheck.com/wapi/auth/user-profile/{slug}"
+    base_url = os.getenv("PLATFORM_API_BASE", "https://admin.collarcheck.com/wapi").rstrip("/")
+    target_url = f"{base_url}/auth/user-profile/{slug}"
 
     try:
         import httpx
@@ -309,25 +322,18 @@ async def get_admin_user_profile_endpoint(req: Request, user_slug: Optional[str]
             res = await client.get(target_url, headers=headers)
             if res.status_code == 200:
                 return res.json()
-            else:
-                admin_tok = os.getenv("PLATFORM_ADMIN_TOKEN", "")
-                if admin_tok and token_str != admin_tok:
-                    admin_headers = {
-                        "Accept": "application/json, text/plain, */*",
-                        "Authorization": admin_tok if admin_tok.startswith("Bearer ") else f"Bearer {admin_tok}",
-                        "X-Auth-Token": admin_tok.replace("Bearer ", ""),
-                        "X-User-Id": str(uid or ""),
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    }
-                    res_admin = await client.get(target_url, headers=admin_headers)
-                    if res_admin.status_code == 200:
-                        return res_admin.json()
-                log.warning(f"External user-profile from {target_url} returned status code {res.status_code}: {res.text}")
+            elif res.status_code in (401, 403):
+                log.warning(f"External user-profile from {target_url} returned status code {res.status_code}. Failing closed.")
+                return {
+                    "status": False,
+                    "message": f"External user profile endpoint unauthorized or unavailable for slug '{slug}'",
+                    "data": None
+                }
     except Exception as e:
         log.warning("Failed to fetch external user profile from %s: %s", target_url, e)
 
-    # DB Fallback for user-profile if external API is unreachable or returns 401
-    if db_user:
+    # DB Fallback for user-profile ONLY if external API is unreachable AND requested slug belongs to authenticated db_user
+    if db_user and db_user.get("slug") == slug:
         return {
             "status": True,
             "message": "User Profile (DB Fallback)",
@@ -374,7 +380,8 @@ async def get_all_employment_new_endpoint(req: Request, _token_payload: dict = D
     }
 
 
-    target_url = "https://admin.collarcheck.com/wapi/employee/allEmployementNew"
+    base_url = os.getenv("PLATFORM_API_BASE", "https://admin.collarcheck.com/wapi").rstrip("/")
+    target_url = f"{base_url}/employee/allEmployementNew"
 
     try:
         import httpx
@@ -436,6 +443,54 @@ def validate_reply(reply: str, allowed_ids: set, pattern: str = r'/(?:jobs-detai
         return "Here are your matches:", True
     return reply, False
 
+
+def sanitize_job_results_reply(reply: str, results: Optional[List[Any]], result_type: Optional[str]) -> str:
+    """
+    Enforces a concise, deterministic framing sentence when structured job cards are present,
+    preventing the LLM from duplicating the job list or titles in prose.
+    """
+    if not results or result_type not in ("jobs", "urgent_jobs"):
+        return reply
+
+    clean_reply = (reply or "").strip()
+    if not clean_reply:
+        return f"I found {len(results)} matching jobs for your search. Here are the results:"
+
+    has_list_formatting = bool(re.search(r'(?:^|\n)\s*(?:[1-9]\d*[\.\)]|[-*•])\s+\S+', clean_reply))
+
+    has_title_duplicate = False
+    for item in results:
+        title = None
+        if hasattr(item, "title") and item.title:
+            title = str(item.title).strip()
+        elif isinstance(item, dict) and item.get("title"):
+            title = str(item["title"]).strip()
+
+        if title and len(title) > 3 and title.lower() in clean_reply.lower():
+            has_title_duplicate = True
+            break
+
+    if has_list_formatting or has_title_duplicate:
+        # If the reply contains multiple paragraphs/sentences, check if the first paragraph is clean framing
+        paragraphs = [p.strip() for p in clean_reply.split('\n\n') if p.strip()]
+        first_p = paragraphs[0] if paragraphs else ""
+        first_p_is_clean = (
+            first_p
+            and not re.search(r'(?:^|\n)\s*(?:[1-9]\d*[\.\)]|[-*•])\s+\S+', first_p)
+            and not any(
+                (hasattr(item, "title") and item.title and len(str(item.title).strip()) > 3 and str(item.title).strip().lower() in first_p.lower())
+                or (isinstance(item, dict) and item.get("title") and len(str(item["title"]).strip()) > 3 and str(item["title"]).strip().lower() in first_p.lower())
+                for item in results
+            )
+        )
+        if first_p_is_clean and len(first_p) <= 200:
+            return first_p
+
+        count_str = f"{len(results)} " if len(results) > 0 else ""
+        return f"I found {count_str}matching jobs for your search. Here are the top matches:"
+
+    return clean_reply
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depends(verify_token)):
     timing = start_request_timing()
@@ -465,47 +520,131 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             return ChatResponse(reply=blocked, success=True, request_id=req_id)
 
         # User Data Service Interception (Phase 5)
-        auth_token = req.headers.get("Authorization") or req.headers.get("X-Auth-Token") or ""
-        u_id = str(getattr(req.state, "user_id", "")) or str(_token_payload.get("uid") or _token_payload.get("id") or _token_payload.get("email") or "") if isinstance(_token_payload, dict) else ""
+        auth_token = None
+        u_db_id = getattr(req.state, "db_user_id", None)
+        if u_db_id is None and isinstance(_token_payload, dict):
+            raw_tid = _token_payload.get("uid") or _token_payload.get("id")
+            if isinstance(raw_tid, int) and raw_tid > 0:
+                u_db_id = raw_tid
+            elif isinstance(raw_tid, str) and raw_tid.strip().isdigit() and int(raw_tid.strip()) > 0:
+                u_db_id = int(raw_tid.strip())
+
+        if isinstance(u_db_id, int) and u_db_id > 0:
+            try:
+                from backend.services.token_resolver import get_user_platform_token, TokenResolutionStatus
+                tok_res = get_user_platform_token(u_db_id)
+                if tok_res.status == TokenResolutionStatus.SUCCESS and tok_res.token:
+                    auth_token = tok_res.token
+            except Exception as tok_ex:
+                log.warning("Token resolution failed in chat endpoint: %s", tok_ex)
+
+        if not auth_token:
+            raw_header_tok = req.headers.get("Authorization") or req.headers.get("X-Auth-Token")
+            if raw_header_tok:
+                clean_tok = raw_header_tok.replace("Bearer ", "").strip()
+                if clean_tok and not (clean_tok.count(".") == 2 and all(len(p.strip()) > 0 for p in clean_tok.split("."))):
+                    auth_token = clean_tok
+
+        u_id = str(u_db_id) if u_db_id is not None else (str(getattr(req.state, "user_id", "")) or str(_token_payload.get("uid") or _token_payload.get("id") or _token_payload.get("email") or "") if isinstance(_token_payload, dict) else "")
         u_slug = str(getattr(req.state, "user_slug", "")) or str(_token_payload.get("user_slug") or _token_payload.get("slug") or "") if isinstance(_token_payload, dict) else ""
         
         # Security Hardening: Enforce trusted JWT identity and role over client-supplied payload body
         user_role = str(getattr(req.state, "role", "employee"))
         request.user_id = u_id if u_id else request.user_id
+        session_id = request.session_id or "default_session"
+
+        try:
+            from backend.utils.session_state import touch_session_state
+            touch_session_state(session_id, role=user_role, user_id=u_db_id)
+        except Exception as e:
+            log.warning("Failed to touch session state: %s", e)
 
         try:
             from backend.services import user_data_service
-            uds_res = await user_data_service.handle_query(last_user_msg, token=auth_token, user_slug=u_slug, user_id=u_id)
-            if uds_res.handled:
-                intent_hint = "user_data"
-                return ChatResponse(
-                    reply=uds_res.reply,
-                    results=uds_res.results_payload,
-                    result_type=uds_res.result_type_payload,
-                    success=True,
-                    request_id=req_id
-                )
+
+            # Structured Action Interception (e.g. employment_company_select chip click)
+            req_action = getattr(request, "action", None)
+            if isinstance(req_action, dict) and req_action.get("type") == "employment_company_select":
+                if u_db_id is None:
+                    return ChatResponse(
+                        reply="Please log in to view your profile details.",
+                        success=True,
+                        request_id=req_id
+                    )
+                comp_name = req_action.get("company_name") or last_user_msg
+                query_msg = f"employment verification status for {comp_name}"
+                uds_res = await user_data_service.handle_query(query_msg, token=auth_token, user_slug=u_slug, user_id=u_db_id, session_id=session_id)
+                if uds_res.handled:
+                    intent_hint = "user_data"
+                    return ChatResponse(
+                        reply=uds_res.reply,
+                        results=uds_res.results_payload,
+                        result_type=uds_res.result_type_payload,
+                        presentation_mode=uds_res.presentation_mode,
+                        action_metadata=uds_res.action_metadata,
+                        selection_metadata=uds_res.selection_metadata,
+                        requested_level=uds_res.requested_level,
+                        success=True,
+                        request_id=req_id
+                    )
+
+            intents = user_data_service.parse_user_data_intents(last_user_msg)
+
+            # Check for manual text entry matching a pending session employment selection
+            if not intents and last_user_msg and session_id:
+                try:
+                    from backend.utils.session_state import (
+                        get_session_option_mapping,
+                        get_pending_requested_level,
+                        get_selected_employment_context
+                    )
+                    opt_map = get_session_option_mapping(session_id)
+                    pending_lvl = get_pending_requested_level(session_id)
+                    selected_ctx = get_selected_employment_context(session_id)
+                    if opt_map or pending_lvl is not None or selected_ctx:
+                        msg_clean = last_user_msg.strip().lower()
+                        is_key_match = bool(re.search(r"\bemp_rec_\d+\b", msg_clean))
+                        is_digit_match = msg_clean.isdigit() and 1 <= int(msg_clean) <= (len(opt_map) if opt_map else 99)
+                        is_text_selection = False
+                        if opt_map:
+                            for composite_val in opt_map.values():
+                                c_name = composite_val.split("::")[0] if isinstance(composite_val, str) else ""
+                                if c_name and c_name in msg_clean:
+                                    is_text_selection = True
+                                    break
+                        if is_key_match or is_digit_match or is_text_selection or pending_lvl is not None:
+                            from backend.services.user_data_intent_parser import UserIntent
+                            intents = [UserIntent.EMPLOYMENT_VERIFICATION]
+                            log.debug("Session pending selection state matched input '%s'", last_user_msg)
+                except Exception as ex:
+                    log.warning("Failed checking pending session option mapping: %s", ex)
+
+            if intents:
+                if u_db_id is None:
+                    return ChatResponse(
+                        reply="Please log in to view your profile details.",
+                        success=True,
+                        request_id=req_id
+                    )
+                uds_res = await user_data_service.handle_query(last_user_msg, token=auth_token, user_slug=u_slug, user_id=u_db_id, session_id=session_id)
+                if uds_res.handled:
+                    intent_hint = "user_data"
+                    return ChatResponse(
+                        reply=uds_res.reply,
+                        results=uds_res.results_payload,
+                        result_type=uds_res.result_type_payload,
+                        presentation_mode=uds_res.presentation_mode,
+                        action_metadata=uds_res.action_metadata,
+                        selection_metadata=uds_res.selection_metadata,
+                        requested_level=uds_res.requested_level,
+                        success=True,
+                        request_id=req_id
+                    )
+
         except Exception as e:
             log.exception("User data service handler failed: %s", e)
 
         system = SYSTEM_PROMPT
-
-        # Profile context integration (loaded ONCE per session)
-        session_id = request.session_id or "default_session"
-        try:
-            from src.profile.loader import fetch_raw
-            from src.profile.normalize import normalize
-            from src.profile.context import to_context
-
-            # Use individual_id if present in token/payload or fallback to default mock session id
-            individual_id = getattr(req.state, "individual_id", None) or session_id
-            raw_profile = fetch_raw(individual_id)
-            normalized_profile = normalize(raw_profile)
-            profile_ctx = to_context(normalized_profile)
-            if profile_ctx:
-                system += f"\n\n{profile_ctx}\n\n## INSTRUCTION: Answer employment and skill questions ONLY from the provided User Profile block. If a requested detail is absent, state that it is absent rather than guessing or inferring."
-        except Exception as p_err:
-            log.warning("Profile context injection failed: %s", str(p_err))
 
         user_location = request.user_location
         req_lat = request.latitude
@@ -955,7 +1094,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             user_edu_cards = []
             user_emp_list = []
             db_user = None
-            email = req.state.email
+            email = getattr(req.state, "email", "")
             user_type = 1 if user_role == "employee" else 2
 
             with stage_timer("profile_fetch"):
@@ -1032,7 +1171,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
 
                         c.execute(
                             """
-                            SELECT e.id, e.company, d.name as designation_name, dept.name as department_name, et.name as emp_type_name, e.joining_date, e.worked_till_date, e.still_working, e.salary, e.salary_inhand, e.salary_mode
+                            SELECT e.id, e.company, e.skill, d.name as designation_name, dept.name as department_name, et.name as emp_type_name, e.joining_date, e.worked_till_date, e.still_working, e.salary, e.salary_inhand, e.salary_mode
                             FROM cyb_user_experience e
                             LEFT JOIN cyb_designation d ON e.designation = d.id
                             LEFT JOIN cyb_department dept ON e.department = dept.id
@@ -1042,7 +1181,10 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
                             (u_id,)
                         )
                         emp_rows = c.fetchall()
+                        emp_skill_raw_list = []
                         for erow in emp_rows:
+                            if erow.get("skill"):
+                                emp_skill_raw_list.append(erow["skill"])
                             c_val = erow["company"] or "Company N/A"
                             if str(c_val).isdigit():
                                 c.execute("SELECT fname, lname FROM cyb_user WHERE id = %s LIMIT 1", (int(c_val),))
@@ -1059,6 +1201,22 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
                             w_date = "Present" if erow["still_working"] == 1 else (erow["worked_till_date"] or "N/A")
                             sal_str = f", Salary: {erow['salary']} {erow['salary_inhand']} ({erow['salary_mode']})" if erow.get("salary") else ""
                             user_emp_list.append(f"{desig_n} at {c_val} ({dept_n}, {etype_n}) from {j_date} to {w_date}{sal_str}")
+
+                        # Aggregate profile skills + employment skills in-memory for runtime request context
+                        try:
+                            from backend.services.user_data_extractor import aggregate_user_skills
+                        except ModuleNotFoundError:
+                            from services.user_data_extractor import aggregate_user_skills  # type: ignore
+
+                        prof_skill_cnt = len(user_skills_list)
+                        user_skills_list = aggregate_user_skills(
+                            profile_skills=user_skills_list,
+                            employment_skill_raw_list=emp_skill_raw_list,
+                        )
+                        log.info(
+                            "aggregated_skills profile_skill_count=%d employment_records_count=%d aggregated_skill_count=%d",
+                            prof_skill_cnt, len(emp_skill_raw_list), len(user_skills_list)
+                        )
 
                         c.execute("SELECT COUNT(*) as cnt FROM cyb_user_certificate WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (u_id,))
                         row = c.fetchone()
@@ -1090,7 +1248,8 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
                 from services.search_router import dispatch_search_target  # type: ignore
 
             # 1. Parse Search Target (LLM + Context Precedence Guardrails)
-            parsed_query = await parse_search_query(last_user_msg, user_role, messages, user_location=user_location)
+            async with stage_timer_async("search_parse"):
+                parsed_query = await parse_search_query(last_user_msg, user_role, messages, user_location=user_location, session_id=session_id)
             target = parsed_query.get("search_target")
 
             # 2. Authorization Check
@@ -1121,6 +1280,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
                     token=auth_token,
                     user_slug=u_slug,
                     session_id=session_id,
+                    parsed_query=parsed_query,
                 )
 
 
@@ -1351,9 +1511,10 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
         async with stage_timer_async("compose"):
             reply = await LLMService.get_chat_completion(system, bounded_messages, timeout=30.0, record_tokens_as="compose", max_tokens=max_tokens_compose)
 
-        # Part E: Server-side validation of reply
+        # Part E: Server-side validation and deduplication of reply
         reply, violated = validate_reply(reply, allowed_ids)
         set_validation_flag(violated)
+        reply = sanitize_job_results_reply(reply, results_payload, result_type_payload)
 
         pagination_meta_res = search_dict.get("pagination") if (search_dict and isinstance(search_dict, dict)) else None
         chips_meta_res = search_dict.get("suggestion_chips") if (search_dict and isinstance(search_dict, dict)) else None
@@ -1364,7 +1525,7 @@ async def chat(request: ChatRequest, req: Request, _token_payload: dict = Depend
             results=results_payload, 
             result_type=result_type_payload,
             jobs=results_payload if result_type_payload in ("jobs", "urgent_jobs") else None,
-            candidates=results_payload if result_type_payload == "candidates" else None,
+            candidates=results_payload if result_type_payload in ("people", "candidates") else None,
             pagination=pagination_meta_res,
             suggestion_chips=chips_meta_res,
         )

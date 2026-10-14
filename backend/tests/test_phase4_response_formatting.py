@@ -50,7 +50,7 @@ def test_a1_english_response_formatting_regression():
     extracted = {"profile_skills": [{"skill": "Python"}, {"skill": "FastAPI"}]}
     res = format_single_intent(UserIntent.PROFILE_SKILLS, extracted, {})
     assert "Python, FastAPI" in res
-    assert res.startswith("**Your Profile Skills:**")
+    assert res.startswith("**Your Skills:**")
 
 
 def test_a2_hindi_language_text_formatting():
@@ -209,7 +209,7 @@ def test_b12_profile_skills():
     """B12: Formats PROFILE_SKILLS intent."""
     data = {"profile_skills": [{"skill": "Python"}]}
     res = format_single_intent(UserIntent.PROFILE_SKILLS, data, {})
-    assert "Profile Skills" in res
+    assert "Your Skills" in res
 
 
 def test_b13_profile_education():
@@ -283,7 +283,7 @@ def test_c1_multi_intent_two_intents_formatting():
         UserIntent.PROFILE_CERTIFICATES: {"certificates": [{"course": "CKA"}]}
     }
     res = format_multi_intent_response(intents, extracted, {})
-    assert "Your Profile Skills" in res
+    assert "Your Skills" in res
     assert "Your Certifications" in res
 
 
@@ -296,7 +296,7 @@ def test_c2_multi_intent_three_intents_double_newline_separator():
         UserIntent.PROFILE_LANGUAGES: {"languages": [{"name": "English"}]}
     }
     res = format_multi_intent_response(intents, extracted, {})
-    assert "Your Profile Skills" in res
+    assert "Your Skills" in res
     assert "education details" in res
     assert "Spoken Languages" in res
     assert "\n\n" in res
@@ -307,7 +307,7 @@ def test_c3_multi_intent_duplicate_intents_deduplication():
     intents = [UserIntent.PROFILE_SKILLS, UserIntent.PROFILE_SKILLS]
     extracted = {UserIntent.PROFILE_SKILLS: {"profile_skills": [{"skill": "Python"}]}}
     res = format_multi_intent_response(intents, extracted, {})
-    assert "Your Profile Skills" in res
+    assert "Your Skills" in res
 
 
 def test_c4_multi_intent_section_fault_isolation():
@@ -327,7 +327,7 @@ def test_c4_multi_intent_section_fault_isolation():
     with patch("backend.services.user_data_formatter.format_single_intent", side_effect=fault_injector):
         res = format_multi_intent_response(intents, extracted, {})
 
-    assert "Your Profile Skills" in res
+    assert "Your Skills" in res
     assert "An unexpected error occurred while processing" in res
 
 
@@ -968,3 +968,120 @@ def test_g7_presentation_and_failure_path_immutability():
     assert rec_result == rec_result_before
     assert pagination_meta == pagination_meta_before
     assert phase3_dto == phase3_dto_before
+
+
+# =====================================================================
+# CATEGORY H: Phase 5.2 Duplicate Chat Output Prevention (H1–H6)
+# =====================================================================
+
+def test_h1_job_results_with_duplicated_prose():
+    """H1: When the LLM reply repeats a returned job title, sanitize_job_results_reply rewrites to concise framing."""
+    from backend.main import sanitize_job_results_reply
+    from backend.schemas.schemas import JobCard
+
+    job_cards = [
+        JobCard(job_id=101, title="Python Backend Engineer", company="Tech Solutions", department="Engineering", location="Delhi", job_mode="office", experience="3 yrs", salary="12 LPA", preview="...", description="...", url="https://example.com/101", match_reason="Matched")
+    ]
+    duplicative_reply = "I found some great jobs for you! Here is the Python Backend Engineer role at Tech Solutions that matches your skills."
+
+    sanitized = sanitize_job_results_reply(duplicative_reply, job_cards, "jobs")
+    assert "Python Backend Engineer" not in sanitized
+    assert "Tech Solutions" not in sanitized
+    assert "matching jobs for your search" in sanitized
+
+
+def test_h2_job_results_with_numbered_prose():
+    """H2: When the LLM reply generates a numbered or bulleted list of jobs, sanitize_job_results_reply suppresses the list."""
+    from backend.main import sanitize_job_results_reply
+    from backend.schemas.schemas import JobCard
+
+    job_cards = [
+        JobCard(job_id=1, title="Data Analyst", company="Corp A", department="Data", location="Remote", job_mode="home", experience="2 yrs", salary="8 LPA", preview="...", description="...", url="https://example.com/1", match_reason="Matched"),
+        JobCard(job_id=2, title="ML Engineer", company="Corp B", department="AI", location="Bangalore", job_mode="office", experience="4 yrs", salary="15 LPA", preview="...", description="...", url="https://example.com/2", match_reason="Matched")
+    ]
+    numbered_reply = (
+        "Here are the jobs I found for you:\n"
+        "1. Data Analyst at Corp A\n"
+        "2. ML Engineer at Corp B"
+    )
+
+    sanitized = sanitize_job_results_reply(numbered_reply, job_cards, "jobs")
+    assert "1. Data Analyst" not in sanitized
+    assert "2. ML Engineer" not in sanitized
+    assert "matching jobs for your search" in sanitized
+
+
+def test_h3_normal_concise_job_reply_preserved():
+    """H3: When the LLM reply is clean framing without repeating titles or lists, it is preserved unchanged."""
+    from backend.main import sanitize_job_results_reply
+    from backend.schemas.schemas import JobCard
+
+    job_cards = [
+        JobCard(job_id=1, title="Full Stack Developer", company="StartupX", department="Eng", location="Mumbai", job_mode="hybrid", experience="2 yrs", salary="10 LPA", preview="...", description="...", url="https://example.com/1", match_reason="Matched")
+    ]
+    clean_reply = "I found 5 roles matching your criteria — here are the top matches:"
+
+    sanitized = sanitize_job_results_reply(clean_reply, job_cards, "jobs")
+    assert sanitized == clean_reply
+
+
+def test_h4_empty_job_results_not_overwritten():
+    """H4: When results are empty or None, sanitize_job_results_reply does not claim jobs were found."""
+    from backend.main import sanitize_job_results_reply
+
+    empty_reply = "I couldn't find any jobs matching your specific criteria in Delhi."
+
+    assert sanitize_job_results_reply(empty_reply, [], "jobs") == empty_reply
+    assert sanitize_job_results_reply(empty_reply, None, "jobs") == empty_reply
+
+
+def test_h5_non_job_response_isolation():
+    """H5: Non-job responses (e.g. employment_verification, user_data, general knowledge) are never touched."""
+    from backend.main import sanitize_job_results_reply
+
+    verification_reply = (
+        "## VERIFICATION STATUS\n"
+        "1. Google LLC - Verified\n"
+        "2. Microsoft - Pending"
+    )
+    res_payload = [{"company": "Google LLC"}, {"company": "Microsoft"}]
+
+    sanitized = sanitize_job_results_reply(verification_reply, res_payload, "employment_verification")
+    assert sanitized == verification_reply
+
+    knowledge_reply = "CollarCheck is India's first identity verification platform."
+    assert sanitize_job_results_reply(knowledge_reply, None, "knowledge_answer") == knowledge_reply
+
+
+@pytest.mark.asyncio
+async def test_h6_prompt_context_no_longer_includes_job_titles():
+    """H6: Verifies employee job search db_context_str no longer includes compact_lines title injection."""
+    from unittest.mock import patch, AsyncMock
+    from backend.api.employee import handle_employee_context
+
+    mock_hits = [
+        {"id": 901, "job_title": "Software Engineer", "company_name": "UniqueSecretCompanyOne", "skills": ["Python"]},
+        {"id": 902, "job_title": "Backend Developer", "company_name": "UniqueSecretCompanyTwo", "skills": ["Python"]}
+    ]
+
+    with patch("backend.api.employee.execute_hybrid_job_search", new_callable=AsyncMock) as mock_search, \
+         patch("backend.api.employee.should_run_search_parse_safe", return_value=(True, "test")), \
+         patch("backend.services.job_match_client.job_match_client.match_preview", new_callable=AsyncMock, return_value={}):
+
+        mock_search.return_value = (mock_hits, {"ranked_jobs": mock_hits})
+
+        res = await handle_employee_context(
+            last_user_msg="find python jobs in Delhi",
+            session_id="test_sess_h6",
+            parsed_query={"is_search_intent": True, "search_target": "JOBS", "keyword": "python", "location": "Delhi"}
+        )
+
+        assert res is not None
+        db_context = res.get("db_context", "")
+        # Essential metadata remains
+        assert "## JOB SEARCH RESULT SUMMARY" in db_context
+        assert "2 matching job(s)" in db_context
+        # But individual titles and company names are NOT injected into prompt
+        assert "Software Engineer" not in db_context
+        assert "UniqueSecretCompanyOne" not in db_context
+        assert "Titles retrieved (for your awareness only" not in db_context

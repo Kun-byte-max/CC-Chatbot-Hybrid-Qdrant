@@ -21,6 +21,7 @@ class CandidateProfile:
     country: Optional[str] = None
     expected_salary: Optional[float] = None
     current_title: Optional[str] = None
+    skill_provenance: Optional[List[Any]] = None
     raw_data: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -40,14 +41,20 @@ class CandidateProfile:
         raw_skills = d.get("skills") or d.get("skill_names") or d.get("exp_skills") or d.get("all_Skill")
         if isinstance(raw_skills, list):
             for s in raw_skills:
+                if s is None:
+                    continue
                 if isinstance(s, dict):
                     val = s.get("skill") or s.get("name") or s.get("title")
-                    if val and str(val).strip():
-                        skills.append(str(val).strip())
+                    if val is not None and str(val).strip():
+                        s_str = str(val).strip()
+                        if not s_str.isdigit() and s_str.lower() not in {"none", "null", "undefined", "n/a", "na"}:
+                            skills.append(s_str)
                 elif str(s).strip():
-                    skills.append(str(s).strip())
+                    s_str = str(s).strip()
+                    if not s_str.isdigit() and s_str.lower() not in {"none", "null", "undefined", "n/a", "na"}:
+                        skills.append(s_str)
         elif isinstance(raw_skills, str):
-            skills = [s.strip() for s in raw_skills.split(",") if s.strip()]
+            skills = [s.strip() for s in raw_skills.split(",") if s.strip() and not s.strip().isdigit() and s.strip().lower() not in {"none", "null", "undefined", "n/a", "na"}]
 
         exp_years = d.get("total_experience_years") or d.get("experience_years") or 0.0
         try:
@@ -119,10 +126,19 @@ class JobProfile:
 
         req_skills = []
         raw_skills = d.get("required_skills") or d.get("skills") or d.get("skill_names")
+        if not raw_skills and isinstance(d.get("raw_data"), dict):
+            raw_skills = d["raw_data"].get("skill_names") or d["raw_data"].get("required_skills") or d["raw_data"].get("skills")
+
         if isinstance(raw_skills, list):
-            req_skills = [str(s).strip() for s in raw_skills if str(s).strip()]
+            req_skills = [
+                str(s).strip() for s in raw_skills
+                if s is not None and str(s).strip() and not str(s).strip().isdigit() and str(s).strip().lower() not in {"none", "null", "undefined", "n/a", "na"}
+            ]
         elif isinstance(raw_skills, str):
-            req_skills = [s.strip() for s in raw_skills.split(",") if s.strip()]
+            req_skills = [
+                s.strip() for s in raw_skills.split(",")
+                if s.strip() and not s.strip().isdigit() and s.strip().lower() not in {"none", "null", "undefined", "n/a", "na"}
+            ]
 
         req_exp = d.get("required_experience_years") or d.get("min_experience_years") or d.get("experience_years") or 0.0
         try:
@@ -190,6 +206,7 @@ class SkillMatchResult:
     extra_skills: List[str]
     total_required: int
     total_matched: int
+    match_level: str = "none"  # "exact", "partial", "none", or "unknown"
 
 
 @dataclass

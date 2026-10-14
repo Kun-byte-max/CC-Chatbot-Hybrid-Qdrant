@@ -19,6 +19,17 @@ JOB_MATCH_TIMEOUT_SECONDS = float(os.getenv("JOB_MATCH_TIMEOUT_SECONDS", "5.0"))
 JOB_MATCH_ENABLED = os.getenv("JOB_MATCH_ENABLED", "false").lower() in ("true", "1", "yes")
 JOB_MATCH_LIMIT = int(os.getenv("JOB_MATCH_LIMIT", "11"))
 
+PLATFORM_MEDIA_BASE_URL = os.getenv("PLATFORM_MEDIA_BASE_URL", "https://admin.collarcheck.com")
+ALLOWED_MEDIA_DOMAINS = set(
+    os.getenv("ALLOWED_MEDIA_DOMAINS", "admin.collarcheck.com,www.collarcheck.com,collarcheck.com,ai.collarcheck.com").split(",")
+)
+
+HYBRID_SEARCH_ENABLED = os.getenv("HYBRID_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+HYBRID_MEILISEARCH_WEIGHT = float(os.getenv("HYBRID_MEILISEARCH_WEIGHT", "0.70"))
+HYBRID_JOBMATCH_WEIGHT = float(os.getenv("HYBRID_JOBMATCH_WEIGHT", "0.30"))
+HYBRID_RRF_K = int(os.getenv("HYBRID_RRF_K", "60"))
+HYBRID_RETRIEVAL_LIMIT = int(os.getenv("HYBRID_RETRIEVAL_LIMIT", "30"))
+
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "collarcheck.db"))
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -31,7 +42,33 @@ JOB_MODE_MAP = {1: "Work from Office", 2: "Work from Home", 3: "Hybrid"}
 
 MAX_RESULTS = 5
 
-JOB_PROFILE_SKILLS_MAP = {
+class DynamicSkillsMap(dict):
+    """
+    Dynamic dictionary proxy for job profile skills mapping.
+    Queries database dynamically via get_dynamic_job_profile_skills before falling back to initial default values.
+    """
+    def __getitem__(self, key: str):
+        skills = self._get_dynamic(key)
+        return skills if skills else super().get(key, ["Python", "SQL", "API Design", "System Design"])
+
+    def get(self, key: str, default=None):
+        skills = self._get_dynamic(key)
+        if skills:
+            return skills
+        return super().get(key, default or ["Python", "SQL", "API Design", "System Design"])
+
+    def _get_dynamic(self, key: str):
+        try:
+            from backend.repositories.job_repository import get_dynamic_job_profile_skills
+            dyn = get_dynamic_job_profile_skills(str(key))
+            if dyn:
+                return dyn
+        except Exception:
+            pass
+        return None
+
+
+JOB_PROFILE_SKILLS_MAP = DynamicSkillsMap({
     "Backend Developer": ["Node.js", "Python", "SQL", "API Design", "System Design"],
     "Frontend Developer": ["React", "JavaScript", "HTML/CSS", "TypeScript", "Vue.js"],
     "Full Stack Developer": ["React", "Node.js", "Python", "SQL", "REST APIs"],
@@ -42,7 +79,8 @@ JOB_PROFILE_SKILLS_MAP = {
     "Software Engineer": ["Python", "Java", "C++", "SQL", "Git"],
     "Java Developer": ["Java", "Spring Boot", "SQL", "Microservices", "REST APIs"],
     "Python Developer": ["Python", "Django", "FastAPI", "SQL", "PostgreSQL"],
-}
+})
+
 
 EMPLOYER_TRIGGERS = [
     "hire", "hiring", "recruit", "recruiting", "looking to hire",

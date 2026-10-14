@@ -48,8 +48,18 @@ class CandidateRepository:
         c = conn.cursor()
         skills = []
         try:
-            s_rows = c.execute("SELECT skill FROM cyb_user_skill WHERE user = %s AND status = 1", (candidate_id,)).fetchall()
-            skills = [r[0] for r in s_rows if r[0]]
+            c.execute(
+                """
+                SELECT s.name
+                FROM cyb_user_skill us
+                JOIN cyb_skill s ON us.skill = s.id
+                WHERE us.user = %s AND us.status = 1 AND (us.is_deleted IS NULL OR us.is_deleted = 0)
+                """,
+                (candidate_id,)
+            )
+            s_rows = c.fetchall()
+            skills = [(r["name"] if isinstance(r, dict) else (r[0] if isinstance(r, (list, tuple)) else "")) for r in s_rows]
+            skills = [s.strip() for s in skills if s and str(s).strip()]
         except Exception:
             log.exception(f"Failed to fetch skills for candidate {candidate_id}")
         finally:

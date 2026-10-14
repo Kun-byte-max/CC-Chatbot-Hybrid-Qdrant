@@ -6,13 +6,50 @@ try:
     from backend.schemas.search_criteria import SearchCriteria
     from backend.services.location_service import resolve_location_from_db, LocationResult
     from backend.schemas.search_query import LocationMode
+    from backend.config.config import PLATFORM_MEDIA_BASE_URL, ALLOWED_MEDIA_DOMAINS
 except ModuleNotFoundError:
     from repositories.people_repository import PeopleRepository  # type: ignore
     from schemas.search_criteria import SearchCriteria  # type: ignore
     from services.location_service import resolve_location_from_db, LocationResult  # type: ignore
     from schemas.search_query import LocationMode  # type: ignore
+    from config.config import PLATFORM_MEDIA_BASE_URL, ALLOWED_MEDIA_DOMAINS  # type: ignore
 
 log = logging.getLogger(__name__)
+
+
+def resolve_profile_photo_url(raw_profile: Optional[str]) -> Optional[str]:
+    """
+    Validates and normalizes candidate raw profile field into a safe absolute photo URL.
+    Rejects unsafe schemas (javascript:, data:, file:, ftp:), path traversal (..), null bytes (\x00),
+    and untrusted external domains. Returns None if profile is missing, invalid, or untrusted.
+    """
+    if not raw_profile or not isinstance(raw_profile, str):
+        return None
+
+    cleaned = raw_profile.strip()
+    if not cleaned or cleaned.lower() in ("none", "null", "undefined", "n/a"):
+        return None
+
+    if "\x00" in cleaned or ".." in cleaned:
+        return None
+
+    if cleaned.startswith("http://") or cleaned.startswith("https://"):
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(cleaned)
+            hostname = (parsed.hostname or "").lower()
+            if hostname in ALLOWED_MEDIA_DOMAINS:
+                return cleaned
+            return None
+        except Exception:
+            return None
+
+    if ":" in cleaned.split("/")[0]:
+        return None
+
+    rel_path = cleaned.lstrip("/")
+    base_url = PLATFORM_MEDIA_BASE_URL.rstrip("/")
+    return f"{base_url}/{rel_path}"
 
 
 class PeopleSearchService:
@@ -81,6 +118,7 @@ class PeopleSearchService:
             state_id=state_id,
             company=criteria.company,
             exclude_user_id=current_user_id,
+            name=criteria.candidate_name,
             limit=100,
         )
 
@@ -94,10 +132,13 @@ class PeopleSearchService:
         for p in raw_people:
             scoring = EmployeePeopleScoringEngine.score_candidate(
                 candidate=p,
+                requested_name=criteria.candidate_name,
                 requested_title=criteria.title,
                 requested_skills=criteria.skills,
                 requested_exp=float(criteria.experience_min) if criteria.experience_min is not None else None,
+                requested_exp_max=float(criteria.experience_max) if criteria.experience_max is not None else None,
                 requested_location=resolved_loc_name or criteria.location,
+                requested_company=criteria.company,
                 requested_seniority=criteria.seniority_level,
             )
             scored_pairs.append((p, scoring))
@@ -113,8 +154,8 @@ class PeopleSearchService:
             if p_id in seen_card_ids:
                 continue
 
-            # Skip candidates who fail explicit numeric experience or explicit hard filters if experience was requested
-            if criteria.experience_min is not None and not scoring.get("is_eligible", True):
+            # Skip candidates who fail explicit numeric experience (min or max) or explicit hard filters
+            if (criteria.experience_min is not None or criteria.experience_max is not None) and not scoring.get("is_eligible", True):
                 continue
 
             seen_card_ids.add(p_id)
@@ -125,10 +166,21 @@ class PeopleSearchService:
                 "cc_id": f"CC-{p['id']}",
                 "name": p["name"],
                 "title": p["current_title"],
+                "current_title": p["current_title"],
+                "current_designation": p["current_title"],
                 "company": p["company"],
-                "location": p["location"],
+                "current_company_name": p["company"],
+                "location": p.get("location", "Location not specified"),
+                "city": p.get("city"),
+                "state": p.get("state"),
+                "country": p.get("country"),
                 "skills": p["skills"],
+                "matched_skills": scoring.get("matched_skills", []),
+                "match_score": scoring.get("final_score", 0.0),
                 "experience_years": p.get("total_experience_years", 0.0),
+                "experience": p.get("total_experience_years", 0.0),
+                "url": f"https://www.collarcheck.com/candidate/{p['id']}",
+                "profile_photo_url": resolve_profile_photo_url(p.get("profile")),
                 "match_reason": f"Match Score: {scoring.get('final_score', 0.0)}%" if scoring.get('final_score') else "Matched request criteria",
             })
 
@@ -142,17 +194,21 @@ class PeopleSearchService:
         loc_label = f" in {resolved_loc_name}" if resolved_loc_name else ""
         comp_label = f" at {criteria.company}" if criteria.company else ""
 
+        import math
+        per_page = 5
+        total_pages = max(1, math.ceil(count / per_page))
+        
+        # Sliced page 1 results for immediate display
+        page_1_cards = people_cards[:per_page]
+
         db_context_str = (
             f"## PEOPLE SEARCH RESULT SUMMARY\n"
             f"Found {count} professional(s){comp_label}{loc_label}.\n"
-            f"The top {count} are displayed below.\n\n"
+            f"The top {len(page_1_cards)} are displayed below (Page 1 of {total_pages}).\n\n"
             "[MANDATORY AI INSTRUCTION]\n"
             f"Write ONE short framing sentence: 'I found {count} professionals matching your request.' Do NOT list raw JSON."
         )
 
-        import math
-        per_page = 5
-        total_pages = max(1, math.ceil(count / per_page))
         pagination_payload = {
             "current_page": 1,
             "per_page": per_page,
@@ -163,6 +219,9 @@ class PeopleSearchService:
             "end_index": min(per_page, count),
             "has_next": count > per_page,
             "has_prev": False,
+            "result_type": "people",
+            "all_recs": people_cards,
+            "ranked_jobs": people_cards,
         }
 
         return {
@@ -170,6 +229,8 @@ class PeopleSearchService:
             "status": "SUCCESS",
             "db_context": db_context_str,
             "results": people_cards,
+            "all_cards": people_cards,
+            "all_recs": people_cards,
             "result_type": "people",
             "pagination": pagination_payload,
             "raw_hits": [pair[0] for pair in scored_pairs[:count]],

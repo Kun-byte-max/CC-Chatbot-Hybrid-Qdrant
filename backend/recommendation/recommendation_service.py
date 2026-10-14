@@ -569,6 +569,7 @@ class RecommendationService:
         page: int = 1,
         per_page: int = 5,
         session_id: Optional[str] = None,
+        search_gen: Optional[int] = None,
     ) -> Tuple[List[Any], Dict[str, Any], List[Any]]:
         """
         Ranks employer candidate recommendations using EmployerRecommendationEngine,
@@ -640,7 +641,10 @@ class RecommendationService:
                 result_ids=[rec.candidate_id for rec in all_recs],
                 all_recs=all_recs,
             )
-            set_pagination_state(session_id, pag_state.__dict__)
+            pag_dict = pag_state.__dict__.copy()
+            if search_gen is not None:
+                pag_dict["search_gen"] = search_gen
+            set_pagination_state(session_id, pag_dict, role="employer")
 
         pagination_meta = {
             "current_page": current_page,
@@ -652,6 +656,8 @@ class RecommendationService:
             "has_next": current_page < total_pages if total_pages > 0 else False,
             "has_prev": current_page > 1 if total_pages > 0 else False,
         }
+        if search_gen is not None:
+            pagination_meta["search_gen"] = search_gen
 
         return page_slice, pagination_meta, all_recs
 

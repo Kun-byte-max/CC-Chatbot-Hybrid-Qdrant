@@ -20,6 +20,7 @@ class ChatRequest(BaseModel):
     longitude: Optional[float] = None
     user_detail: Optional[Dict[str, Any]] = None
     widgets_data: Optional[Any] = None
+    action: Optional[Dict[str, Any]] = None
 
 class GeocodeRequest(BaseModel):
     latitude: float
@@ -48,18 +49,25 @@ class JobCard(BaseModel):
     match_reason: Optional[str] = None
     global_rank: Optional[int] = None
     match_score: Optional[float] = None
+    urgent: Optional[Union[int, bool]] = None
     matched_skills: Optional[List[str]] = None
     recommendation_explanation: Optional[str] = None
     recommendation_reasons: Optional[List[Dict[str, Any]]] = None
 
 
 class CandidateCard(BaseModel):
+    id: Optional[Union[int, str]] = None
+    candidate_id: Optional[Union[int, str]] = None
     cc_id: str
     name: str
     position: Optional[str] = None
+    title: Optional[str] = None
+    company: Optional[str] = None
+    location: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
     experience_label: Optional[str] = None
+    experience_years: Optional[float] = None
     skills: List[str] = []
     rating: Optional[float] = None
     url: str
@@ -96,11 +104,16 @@ class ChatResponse(BaseModel):
     request_id: Optional[str] = None
     results: Optional[List[Union[JobCard, CandidateCard, OrganizationCard, EducationCard, Dict[str, Any], Any]]] = None
     result_type: Optional[str] = None
+    presentation_mode: Optional[str] = None
     jobs: Optional[List[JobCard]] = None
     candidates: Optional[List[CandidateCard]] = None
     result_total: Optional[int] = None
     pagination: Optional[Dict[str, Any]] = None
-    suggestion_chips: Optional[List[Any]] = None
+    action_metadata: Optional[List[Dict[str, Any]]] = None
+    selection_metadata: Optional[Dict[str, Any]] = None
+    requested_level: Optional[int] = None
+
+
 
 
 class ProfileUpdateRequest(BaseModel):

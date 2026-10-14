@@ -9,16 +9,18 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg-main: #FFFFFF;
-      --bg-bot: #F7F7F8;
-      --text-main: #0D0D0D;
-      --text-muted: #565869;
-      --border-color: #E5E5E5;
+      --bg-main: #0d0d0d;
+      --bg-bot: #0d0d0d;
+      --text-main: #ececec;
+      --text-muted: #a1a1aa;
+      --border-color: #262626;
       --cc-teal: #00C2A8;
       --cc-teal-dk: #009E89;
-      --cc-navy: #0B1F3A;
-      --shadow-md: 0 0 15px rgba(0, 0, 0, 0.1);
+      --cc-navy: #172554;
+      --user-bubble-bg: #172554;
+      --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.5);
     }
+
 
     *,
     *::before,
@@ -200,54 +202,583 @@
     .quick-chips {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-      gap: 10px;
+      gap: 12px;
       max-width: 700px;
       margin: 0 auto;
     }
 
     .chip {
-      font-size: 13px;
-      color: var(--text-muted);
-      background: #f9f9f9;
-      border: 1px solid var(--border-color);
-      border-radius: 12px;
-      padding: 12px 14px;
-      cursor: pointer;
-      text-align: left;
-      transition: all 0.18s;
-      line-height: 1.4;
+      font-size: 13px !important;
+      color: #a1a1aa !important;
+      background: #18181b !important;
+      border: 1px solid #27272a !important;
+      border-radius: 14px !important;
+      padding: 14px 16px !important;
+      cursor: pointer !important;
+      text-align: left !important;
+      transition: all 0.18s !important;
+      line-height: 1.4 !important;
     }
 
     .chip:hover {
-      background: #f0fdf9;
-      border-color: var(--cc-teal);
-      color: var(--text-main);
+      background: #27272a !important;
+      border-color: var(--cc-teal) !important;
+      color: #ffffff !important;
     }
 
     .chip strong {
-      display: block;
-      color: var(--text-main);
-      margin-bottom: 3px;
-      font-size: 13px;
+      display: block !important;
+      color: #f4f4f5 !important;
+      margin-bottom: 4px !important;
+      font-size: 13.5px !important;
     }
 
     .chip span {
-      font-size: 12px;
-      color: #888;
+      font-size: 12px !important;
+      color: #a1a1aa !important;
     }
+
+    /* ── CARD STYLES FOR DARK THEME ──────────────── */
+    .cards-container {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 12px;
+      margin-bottom: 12px;
+      width: 100%;
+    }
+
+    .job-card {
+      background: #18181b !important;
+      border: 1px solid #27272a !important;
+      border-radius: 14px !important;
+      padding: 16px 18px !important;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4) !important;
+      color: #ececec !important;
+      transition: border-color 0.2s ease, transform 0.15s ease;
+    }
+
+    .job-card:hover {
+      border-color: var(--cc-teal) !important;
+      transform: translateY(-1px);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+
+    .card-title {
+      font-size: 16px !important;
+      font-weight: 600 !important;
+      color: #ffffff !important;
+      margin-bottom: 3px !important;
+    }
+
+    .card-subtitle {
+      font-size: 13.5px !important;
+      color: #a1a1aa !important;
+    }
+
+    .card-details {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .detail-tag {
+      background: #27272a !important;
+      color: #d4d4d8 !important;
+      font-size: 12.5px !important;
+      padding: 4px 10px !important;
+      border-radius: 20px !important;
+      border: 1px solid #3f3f46 !important;
+    }
+
+    .badge {
+      font-size: 12px !important;
+      font-weight: 600 !important;
+      padding: 4px 10px !important;
+      border-radius: 12px !important;
+    }
+
+    .badge-teal {
+      background: rgba(0, 194, 168, 0.15) !important;
+      color: #00C2A8 !important;
+      border: 1px solid rgba(0, 194, 168, 0.3) !important;
+    }
+
+    .badge-purple {
+      background: rgba(147, 51, 234, 0.15) !important;
+      color: #c084fc !important;
+      border: 1px solid rgba(147, 51, 234, 0.3) !important;
+    }
+
+    .badge-gold {
+      background: rgba(234, 179, 8, 0.15) !important;
+      color: #fde047 !important;
+      border: 1px solid rgba(234, 179, 8, 0.3) !important;
+    }
+
+    .badge-navy {
+      background: rgba(59, 130, 246, 0.15) !important;
+      color: #60a5fa !important;
+      border: 1px solid rgba(59, 130, 246, 0.3) !important;
+    }
+
+    .candidate-company-header {
+      background: #09090b !important;
+      border: 1px solid #27272a !important;
+      border-radius: 8px !important;
+      padding: 6px 12px !important;
+      margin-bottom: 10px !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: space-between !important;
+    }
+
+    .company-name {
+      color: #f4f4f5 !important;
+      font-weight: 600 !important;
+      font-size: 13px !important;
+    }
+
+    .company-label {
+      color: #a1a1aa !important;
+      font-size: 10.5px !important;
+      font-weight: 600 !important;
+      letter-spacing: 0.05em !important;
+    }
+
+
+    .card-preview-container {
+      background: #09090b !important;
+      border-radius: 8px !important;
+      padding: 10px 12px !important;
+      margin-bottom: 12px !important;
+      border: 1px solid #27272a !important;
+    }
+
+    .card-preview {
+      font-size: 13px !important;
+      color: #d4d4d8 !important;
+      line-height: 1.5 !important;
+    }
+
+    .card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid #27272a !important;
+      padding-top: 10px !important;
+      margin-top: 6px !important;
+    }
+
+    .match-reason {
+      font-size: 12.5px !important;
+      color: #00C2A8 !important;
+      font-weight: 500 !important;
+    }
+
+    .card-action-btn {
+      background: var(--cc-teal) !important;
+      color: #ffffff !important;
+      padding: 7px 14px !important;
+      border-radius: 8px !important;
+      font-size: 13px !important;
+      font-weight: 600 !important;
+      text-decoration: none !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      gap: 4px !important;
+      transition: background 0.2s !important;
+    }
+
+    .card-action-btn:hover {
+      background: var(--cc-teal-dk) !important;
+    }
+
+    .card-action-btn-secondary {
+      background: transparent !important;
+      color: #00C2A8 !important;
+      border: 1px solid #00C2A8 !important;
+      padding: 6px 12px !important;
+      border-radius: 8px !important;
+      font-size: 12px !important;
+      font-weight: 600 !important;
+      cursor: pointer !important;
+    }
+
+    .card-action-btn-secondary:hover {
+      background: rgba(0, 194, 168, 0.1) !important;
+    }
+
+    /* ── QUICK CHIP & SELECTION BUTTONS ────────────── */
+    .quick-chip-btn {
+      background: #1e3a8a !important;
+      color: #ffffff !important;
+      border: 1px solid #3b82f6 !important;
+      padding: 9px 16px !important;
+      border-radius: 10px !important;
+      font-size: 13.5px !important;
+      font-weight: 500 !important;
+      cursor: pointer !important;
+      transition: all 0.2s ease !important;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+    }
+
+    .quick-chip-btn:hover {
+      background: #2563eb !important;
+      border-color: #60a5fa !important;
+      transform: translateY(-1px) !important;
+    }
+
+    /* ── EMPLOYMENT PLAYCARD DEDICATED STYLES ─────── */
+    .employment-card {
+      background: #18181b !important;
+      border: 1px solid #27272a !important;
+      border-radius: 14px !important;
+      padding: 18px 20px !important;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45) !important;
+      color: #ececec !important;
+      margin-bottom: 12px !important;
+      transition: border-color 0.2s ease, transform 0.15s ease;
+    }
+
+    .employment-card:hover {
+      border-color: var(--cc-teal) !important;
+      transform: translateY(-1px);
+    }
+
+    .emp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid #27272a;
+      padding-bottom: 12px;
+    }
+
+    .emp-company-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .emp-logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      object-fit: cover;
+      background: #27272a;
+      border: 1px solid #3f3f46;
+    }
+
+    .emp-logo-fallback {
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--cc-navy) 0%, #1e3a8a 100%);
+      border: 1px solid #3b82f6;
+      color: #60a5fa;
+      font-weight: 700;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+
+    .emp-company-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: #ffffff;
+      line-height: 1.2;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    .emp-role-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 4px;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    .emp-status-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .emp-badge-current {
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      font-size: 11.5px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 12px;
+    }
+
+    .emp-badge-previous {
+      background: rgba(161, 161, 170, 0.15);
+      color: #a1a1aa;
+      border: 1px solid rgba(161, 161, 170, 0.3);
+      font-size: 11.5px;
+      font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 12px;
+    }
+
+    .emp-type-tag {
+      background: #27272a;
+      color: #d4d4d8;
+      font-size: 11.5px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      border: 1px solid #3f3f46;
+      word-break: break-word;
+    }
+
+    .emp-dates {
+      font-size: 13px;
+      color: #a1a1aa;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .emp-section {
+      background: #09090b;
+      border: 1px solid #27272a;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+
+    .emp-section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #a1a1aa;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .emp-highest-badge {
+      font-size: 12px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 12px;
+      background: rgba(0, 194, 168, 0.15);
+      color: #00C2A8;
+      border: 1px solid rgba(0, 194, 168, 0.35);
+    }
+
+    .emp-highest-badge.unverified {
+      background: rgba(161, 161, 170, 0.15);
+      color: #a1a1aa;
+      border: 1px solid rgba(161, 161, 170, 0.35);
+    }
+
+    .emp-levels-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    @media (max-width: 480px) {
+      .emp-levels-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .emp-level-pill {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 6px 4px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: center;
+    }
+
+    .emp-level-pill.verified {
+      background: rgba(16, 185, 129, 0.12);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .emp-level-pill.unverified {
+      background: #18181b;
+      color: #71717a;
+      border: 1px solid #27272a;
+    }
+
+    .emp-comp-verif-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .emp-comp-verif-status.verified {
+      color: #34d399;
+    }
+
+    .emp-comp-verif-status.unverified {
+      color: #f87171;
+    }
+
+    .emp-evidence-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-size: 12.5px;
+    }
+
+    .emp-evidence-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: #d4d4d8;
+    }
+
+    .emp-evidence-item .icon-yes {
+      color: #34d399;
+    }
+
+    .emp-evidence-item .icon-no {
+      color: #71717a;
+    }
+
+    .emp-skills-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .emp-skill-pill {
+      background: #18181b;
+      color: #e4e4e7;
+      border: 1px solid #27272a;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      word-break: break-word;
+    }
+
+    /* ── TOPBAR & USER BADGE ───────────────────── */
+    .topbar {
+      background: #09090b !important;
+      border-bottom: 1px solid #27272a !important;
+    }
+
+    .topbar-brand {
+      color: #ffffff !important;
+    }
+
+    .status-pill {
+      background: #18181b !important;
+      color: #a1a1aa !important;
+      border: 1px solid #27272a !important;
+    }
+
+    .user-profile-badge {
+      background: #18181b !important;
+      border: 1px solid #27272a !important;
+      color: #ececec !important;
+    }
+
+    .user-email-label {
+      color: #ececec !important;
+    }
+
+    /* ── INPUT WRAPPER GRADIENT ────────────────── */
+    .input-wrapper {
+      background: linear-gradient(180deg, rgba(13, 13, 13, 0) 0%, rgba(13, 13, 13, 0.95) 45%, rgba(13, 13, 13, 1) 100%) !important;
+    }
+
+    .input-box {
+      background: #18181b !important;
+      border: 1px solid #27272a !important;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6) !important;
+      border-radius: 26px !important;
+    }
+
+    #msgInput {
+      color: #ffffff !important;
+    }
+
+    #msgInput::placeholder {
+      color: #71717a !important;
+    }
+
+    .action-btn {
+      color: #a1a1aa !important;
+    }
+
+    .action-btn:hover {
+      background: #27272a !important;
+      color: #ffffff !important;
+    }
+
+    /* ── PAGINATION BAR ────────────────────────── */
+    .pagination-bar {
+      background: #18181b !important;
+      border: 1px solid #27272a !important;
+      border-radius: 10px !important;
+    }
+
+    .pagination-bar span {
+      color: #ececec !important;
+    }
+
+    .pagination-bar button {
+      background: #27272a !important;
+      border: 1px solid #3f3f46 !important;
+      color: #00C2A8 !important;
+      border-radius: 6px !important;
+    }
+
 
     /* ── MESSAGE ROWS ────────────────────────────── */
     .msg {
       display: flex;
-      justify-content: center;
       width: 100%;
-      padding: 20px 20px;
+      padding: 16px 20px;
       animation: msgIn 0.25s ease;
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    .msg.user {
+      justify-content: flex-end;
     }
 
     .msg.bot {
-      background: var(--bg-bot);
-      border-bottom: 1px solid rgba(0, 0, 0, .03);
+      justify-content: flex-start;
+      background: transparent;
     }
 
     @keyframes msgIn {
@@ -266,37 +797,63 @@
       display: flex;
       gap: 14px;
       width: 100%;
-      max-width: 768px;
+      max-width: 100%;
     }
 
-    .msg-avatar {
-      width: 32px;
-      height: 32px;
-      border-radius: 6px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 13px;
-      font-weight: 700;
-      flex-shrink: 0;
-      margin-top: 2px;
-    }
-
-    .msg.bot .msg-avatar {
-      background: linear-gradient(135deg, var(--cc-teal) 0%, var(--cc-navy) 100%);
-      color: white;
+    .msg.user .msg-content-wrapper {
+      justify-content: flex-end;
     }
 
     .msg.user .msg-avatar {
-      background: #5436DA;
-      color: white;
+      display: none;
     }
 
-    .bubble {
+    .msg.bot .msg-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--cc-teal) 0%, #0284c7 100%);
+      color: white;
+      font-size: 12px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 2px;
+      box-shadow: 0 2px 8px rgba(0, 194, 168, 0.3);
+    }
+
+    .msg.user .bubble {
+      flex: 0 1 auto;
+      max-width: 75%;
+      background: #172554;
+      color: #ffffff;
+      border-radius: 20px 20px 4px 20px;
+      padding: 14px 18px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+      font-size: 15px;
+      line-height: 1.6;
+      word-wrap: break-word;
+    }
+
+    .msg.user .bubble code {
+      background: rgba(0, 0, 0, 0.4);
+      color: #93c5fd;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+
+    .msg.bot .bubble {
       flex: 1;
+      max-width: 100%;
       font-size: 15px;
       line-height: 1.7;
       color: var(--text-main);
+      background: transparent;
+      padding: 0;
       word-wrap: break-word;
     }
 
@@ -307,11 +864,12 @@
     }
 
     .bubble li {
-      margin-bottom: 5px;
+      margin-bottom: 6px;
     }
 
     .bubble strong {
       font-weight: 600;
+      color: #ffffff;
     }
 
     .bubble em {
@@ -319,31 +877,52 @@
     }
 
     .bubble a {
-      color: var(--cc-teal-dk);
+      color: #38bdf8;
       text-decoration: underline;
     }
 
     .bubble p {
-      margin-bottom: 10px;
+      margin-bottom: 12px;
     }
 
     .bubble p:last-child {
       margin-bottom: 0;
     }
 
+    .bubble h2,
     .bubble h3,
     .bubble h4 {
       font-weight: 600;
-      margin: 12px 0 6px;
+      color: #ffffff;
+      margin: 16px 0 8px;
     }
 
-    .bubble code {
-      background: #f4f4f5;
-      padding: 2px 6px;
-      border-radius: 4px;
+    .msg.bot .bubble code {
+      background: #18181b;
+      color: #38bdf8;
+      padding: 3px 7px;
+      border-radius: 6px;
       font-family: monospace;
-      font-size: 13px;
+      font-size: 13.5px;
+      border: 1px solid #27272a;
     }
+
+    .msg.bot .bubble pre {
+      background: #18181b;
+      border: 1px solid #27272a;
+      border-radius: 12px;
+      padding: 14px 16px;
+      overflow-x: auto;
+      margin: 12px 0;
+    }
+
+    .msg.bot .bubble pre code {
+      background: transparent;
+      padding: 0;
+      border: none;
+      color: #e2e8f0;
+    }
+
 
     /* ── TYPING ──────────────────────────────────── */
     .typing-indicator {
@@ -538,6 +1117,51 @@
 
     .footer-meta a:hover {
       color: var(--cc-teal-dk);
+    }
+
+    /* ── ACTION NAVIGATION CONTROLS (PHASE 3.2) ── */
+    .action-nav-container {
+      margin-top: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .action-nav-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--cc-teal);
+      color: #ffffff !important;
+      padding: 9px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none !important;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 8px rgba(0, 194, 168, 0.22);
+      cursor: pointer;
+      border: none;
+    }
+
+    .action-nav-btn:hover {
+      background: var(--cc-teal-dk);
+      box-shadow: 0 4px 14px rgba(0, 194, 168, 0.35);
+      transform: translateY(-1px);
+    }
+
+    .action-nav-btn:focus-visible {
+      outline: 2px solid var(--cc-navy);
+      outline-offset: 2px;
+    }
+
+    .action-nav-arrow {
+      font-size: 14px;
+      transition: transform 0.2s ease;
+    }
+
+    .action-nav-btn:hover .action-nav-arrow {
+      transform: translateX(3px);
     }
 
     /* ── SETTINGS MODAL ──────────────────────────── */
@@ -1190,6 +1814,14 @@
           platform. Ask about jobs, profiles, or ratings.</p>
 
         <div class="quick-chips">
+          <button class="chip" onclick="askChip('Show my verification progress')">
+            <strong>📊 Verification Progress</strong>
+            <span>Check Level 1–4 status</span>
+          </button>
+          <button class="chip" onclick="askChip('What should I do next for my verification?')">
+            <strong>✨ What is my next step?</strong>
+            <span>Get next-step guidance</span>
+          </button>
           <button class="chip" onclick="askChip('What is CollarCheck and how does it work?')">
             <strong>What is CollarCheck?</strong>
             <span>Learn the basics</span>
@@ -1852,8 +2484,10 @@
       // Bold / italic
       text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
       text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      // Action guidance buttons
+      text = text.replace(/\[(How to complete Level \d+)\](?!\()/g, '<button type="button" class="quick-chip-btn" style="background: var(--cc-navy, #0B1F3A); color: white; border: 1px solid var(--border-color); padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; margin-top: 6px; margin-bottom: 6px; display: inline-block;" onclick="askChip(\'$1\')">👉 $1</button>');
       // Links
-      text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+      text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color: var(--accent-blue, #2563EB); font-weight: 600;">$1</a>');
       // Inline code
       text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
       // Lists
@@ -1880,19 +2514,159 @@
       return text;
     }
 
+    // ── ACTION NAVIGATION CONTROLS RENDERER (PHASE 3.6A) ──
+    const DESTINATION_MAP = {
+      experience_dashboard: 'https://www.collarcheck.com/dashboard/user/experience'
+    };
+
+    const ALLOWED_NAV_URLS = new Set([
+      'https://www.collarcheck.com/dashboard/user/experience'
+    ]);
+
+    const ACTION_REGISTRY = {
+      employment_add: {
+        type: 'nav_link',
+        destination: 'experience_dashboard',
+        label: 'Add Employment',
+        icon: '💼'
+      },
+      employer_verification: {
+        type: 'nav_link',
+        destination: 'experience_dashboard',
+        label: 'Verify Employment',
+        icon: '🛡️'
+      },
+      salary_verification: {
+        type: 'chat_action',
+        message: 'How do I complete Level 4 salary verification?',
+        label: 'Complete Salary Verification',
+        icon: '💰'
+      }
+    };
+
+    // Backward compatible reference for existing static tests
+    const ALLOWED_ACTION_DESTINATIONS = ACTION_REGISTRY;
+
+    function renderActionNavControls(actionMetadata) {
+      if (!Array.isArray(actionMetadata) || actionMetadata.length === 0) return '';
+
+      let htmlResult = '';
+      const seenActionIds = new Set();
+
+      for (const item of actionMetadata) {
+        if (!item || typeof item !== 'object') continue;
+        const actionId = item.id;
+        if (!actionId || seenActionIds.has(actionId)) continue;
+
+        const registryConfig = ACTION_REGISTRY[actionId];
+        if (!registryConfig) continue;
+
+        const itemType = item.type || registryConfig.type;
+        if (itemType !== registryConfig.type) continue;
+
+        seenActionIds.add(actionId);
+
+        const label = item.label || registryConfig.label;
+        const safeLabel = escapeHtml(label);
+        const icon = registryConfig.icon || '🔗';
+
+        if (itemType === 'chat_action') {
+          const trustedMsg = registryConfig.message;
+          const safeAction = escapeHtml(trustedMsg).replace(/'/g, "&#39;");
+          htmlResult += `
+            <div class="action-nav-container">
+              <button type="button" onclick="askChip('${safeAction}')" class="action-nav-btn" aria-label="${safeLabel}">
+                <span>${icon} ${safeLabel}</span>
+                <span class="action-nav-arrow">→</span>
+              </button>
+            </div>
+          `;
+        } else if (itemType === 'nav_link') {
+          const logicalDest = item.destination || registryConfig.destination;
+          const targetUrl = DESTINATION_MAP[logicalDest];
+
+          if (!targetUrl || !ALLOWED_NAV_URLS.has(targetUrl) || !targetUrl.startsWith('https://')) {
+            console.warn("Blocked untrusted or unallowlisted action navigation destination:", logicalDest, targetUrl);
+            continue;
+          }
+
+          const safeUrl = targetUrl;
+          htmlResult += `
+            <div class="action-nav-container">
+              <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="action-nav-btn" aria-label="${safeLabel}">
+                <span>${icon} ${safeLabel}</span>
+                <span class="action-nav-arrow">→</span>
+              </a>
+            </div>
+          `;
+        }
+      }
+
+      return htmlResult;
+    }
+
+    // ── EMPLOYMENT SELECTION CONTROLS RENDERER (PHASE 3.6B) ──
+    function renderSelectionControls(selectionMetadata) {
+      if (!selectionMetadata || typeof selectionMetadata !== 'object') return '';
+      if (selectionMetadata.type !== 'employment_selection') return '';
+
+      const options = selectionMetadata.options;
+      if (!Array.isArray(options) || options.length === 0) return '';
+
+      let htmlResult = '<div class="employment-selection-container" style="margin-top: 12px; display: flex; flex-direction: column; gap: 8px;">';
+      if (selectionMetadata.prompt) {
+        htmlResult += `<div style="font-size: 13px; font-weight: 600; color: var(--text-main);">${escapeHtml(selectionMetadata.prompt)}</div>`;
+      }
+      htmlResult += '<div style="display: flex; flex-wrap: wrap; gap: 8px;">';
+
+      const seenKeys = new Set();
+      for (const opt of options) {
+        if (!opt || typeof opt !== 'object') continue;
+        const key = opt.selection_key || opt.company_name;
+        if (!key || seenKeys.has(key)) continue;
+        seenKeys.add(key);
+
+        const rawLabel = opt.label || opt.company_name || '';
+        const rawDesc = opt.description ? ` (${opt.description})` : '';
+        const fullDisplay = `${rawLabel}${rawDesc}`;
+
+        const safeDisplayLabel = escapeHtml(fullDisplay).replace(/'/g, "&#39;");
+        const safeCompany = escapeHtml(opt.company_name || opt.label || '').replace(/'/g, "&#39;");
+        const safeCompanyId = opt.company_id ? String(opt.company_id) : '';
+
+        if (opt.selection_key) {
+          const safeKey = escapeHtml(opt.selection_key).replace(/'/g, "&#39;");
+          htmlResult += `
+            <button type="button" onclick="askEmploymentRecordChip('${safeKey}', '${safeDisplayLabel}')" class="quick-chip-btn" style="background: var(--cc-navy, #0B1F3A); color: white; border: 1px solid var(--border-color); padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;">
+              🏢 ${escapeHtml(rawLabel)}${escapeHtml(rawDesc)}
+            </button>
+          `;
+        } else if (opt.company_name) {
+          htmlResult += `
+            <button type="button" onclick="askEmploymentCompanyChip('${safeCompany}', '${safeCompanyId}')" class="quick-chip-btn" style="background: var(--cc-navy, #0B1F3A); color: white; border: 1px solid var(--border-color); padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;">
+              🏢 ${escapeHtml(rawLabel)}${escapeHtml(rawDesc)}
+            </button>
+          `;
+        }
+      }
+      htmlResult += '</div></div>';
+      return htmlResult;
+    }
+
     // ── MESSAGES ───────────────────────────────────
     function addUserMessage(text) {
       const msgs = document.getElementById('messages');
       const div = document.createElement('div');
       div.className = 'msg user';
+      const safeText = escapeHtml(text).replace(/\n/g, '<br>');
       div.innerHTML = `
       <div class="msg-content-wrapper">
-        <div class="msg-avatar">U</div>
-        <div class="bubble">${text.replace(/\n/g, '<br>')}</div>
+        <div class="bubble">${safeText}</div>
       </div>`;
       msgs.appendChild(div);
       scrollToBottom();
     }
+
 
     function addBotMessage(html) {
       const msgs = document.getElementById('messages');
@@ -1933,11 +2707,13 @@
     }
 
     // ── SEND MESSAGE ───────────────────────────────
-    async function sendMessage() {
+    async function sendMessage(pendingAction, displayText) {
       if (isWaiting) return;
       const input = document.getElementById('msgInput');
       const text = input.value.trim();
       if (!text) return;
+
+      const userDisplayText = (typeof displayText === 'string' && displayText.trim()) ? displayText.trim() : text;
 
       const nearbyIntent = isNearbyQuery(text);
       console.log("[NearbyDebug] text:", text);
@@ -2018,7 +2794,7 @@
               showToast(`📍 Using location: ${fallbackCity}`, '#00C2A8');
             } else {
               hideHero();
-              addUserMessage(text);
+              addUserMessage(userDisplayText);
               input.value = '';
               input.style.height = 'auto';
               addBotMessage(nearbyLocationErrorMessage((coordsResult && coordsResult.error) || "DENIED"));
@@ -2030,7 +2806,7 @@
         const hasLocationData = hasValidCoords(userCoords) || hasValidCoords(userLocationObj) || (userLocationObj && userLocationObj.city) || userLocation;
         if (!hasLocationData) {
           hideHero();
-          addUserMessage(text);
+          addUserMessage(userDisplayText);
           input.value = '';
           input.style.height = 'auto';
           addBotMessage(nearbyLocationErrorMessage("FAILED"));
@@ -2039,7 +2815,7 @@
       }
 
       hideHero();
-      addUserMessage(text);
+      addUserMessage(userDisplayText);
       conversationHistory.push({ role: 'user', content: text });
       input.value = '';
       input.style.height = 'auto';
@@ -2064,7 +2840,8 @@
           messages: conversationHistory,
           user_location: userLocationObj || userLocation || undefined,
           user_detail: currentUserDetail || undefined,
-          widgets_data: currentWidgetsData || undefined
+          widgets_data: currentWidgetsData || undefined,
+          action: pendingAction || undefined
         };
 
         if (hasNearbyCoords) {
@@ -2110,7 +2887,29 @@
         const reply = data.reply;
         conversationHistory.push({ role: 'assistant', content: reply });
         
-        let html = renderMarkdown(reply);
+        let html = '';
+        // Phase 2.5H: Check presentation_mode for employment verification
+        const presMode = data.presentation_mode;
+        const resType = data.result_type;
+
+        if (resType === 'employment_verification' && presMode === 'GENERIC_EMPLOYMENT_VERIFICATION') {
+          // Generic query: concise contextual header from reply + visual card as primary detailed roadmap
+          const headerReply = reply.split('\n\n🏢')[0].split('\n\n**Company status**')[0];
+          html = renderMarkdown(headerReply || reply);
+        } else {
+          // Standard Markdown reply (including FOCUSED_EMPLOYMENT_VERIFICATION which displays focused guidance text)
+          html = renderMarkdown(reply);
+        }
+
+        const actionNavHtml = renderActionNavControls(data.action_metadata);
+        if (actionNavHtml) {
+          html += actionNavHtml;
+        }
+        const selectionNavHtml = renderSelectionControls(data.selection_metadata);
+        if (selectionNavHtml) {
+          html += selectionNavHtml;
+        }
+
         const results = data.results || data.jobs || data.candidates || data.people;
         if (results && results.length > 0) {
           const containerId = 'job_container_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
@@ -2147,12 +2946,26 @@
       document.getElementById('msgInput').focus();
     }
 
-    /*
     function askChip(text) {
       document.getElementById('msgInput').value = text;
       sendMessage();
     }
-    */
+
+    function askEmploymentRecordChip(selectionKey, displayLabel) {
+      if (!selectionKey || !String(selectionKey).trim()) return;
+      const key = String(selectionKey).trim();
+      document.getElementById('msgInput').value = key;
+      sendMessage(undefined, displayLabel || key);
+    }
+
+    function askEmploymentCompanyChip(companyName, companyId) {
+      document.getElementById('msgInput').value = companyName;
+      sendMessage({
+        type: 'employment_company_select',
+        company_name: companyName,
+        company_id: companyId || undefined
+      });
+    }
 
     function clearChat() {
       conversationHistory = [];
@@ -2186,7 +2999,21 @@
       const endIdx = Math.min(startIdx + store.pageSize, store.jobs.length);
       const pageJobs = store.jobs.slice(startIdx, endIdx);
 
-      const headerTitle = (store.resultType === 'candidates' || store.resultType === 'people') ? 'Matching Professionals' : 'Recommended Jobs';
+      let headerTitle = 'Recommended Jobs';
+      const rt = (store.resultType || '').toLowerCase();
+      if (rt === 'employment_verification') {
+        headerTitle = 'Your Employment Verification';
+      } else if (rt === 'employment' || rt === 'employment_history') {
+        headerTitle = 'Verified Employment History';
+      } else if (rt === 'education') {
+        headerTitle = 'Educational Qualifications';
+      } else if (rt === 'nearby_organizations') {
+        headerTitle = 'Nearby Organizations';
+      } else if (rt === 'candidates' || rt === 'people') {
+        headerTitle = 'Matching Professionals';
+      } else if (rt === 'jobs' || rt === 'urgent_jobs') {
+        headerTitle = 'Recommended Jobs';
+      }
       let html = '';
       html += `
         <div class="job-results-header" style="margin-top: 10px; margin-bottom: 6px; font-weight: 600; font-size: 13px; color: #00C2A8; display: flex; justify-content: space-between; align-items: center;">
@@ -2220,8 +3047,221 @@
       containerWrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
+    function renderEmploymentCardHtml(item) {
+      const companyName = escapeHtml(item.company_name || item.company || 'Company N/A');
+      const companyLogo = item.company_logo;
+
+      // Logo fallback initials
+      const initials = companyName.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('') || 'CO';
+
+      // Employment Status (Current vs Previous)
+      const empStatusRaw = (item.employment_status || (item.still_working ? 'current' : 'previous')).toLowerCase();
+      const isCurrent = empStatusRaw === 'current';
+      const statusBadgeHtml = isCurrent
+        ? `<span class="emp-badge-current">● Current</span>`
+        : `<span class="emp-badge-previous">Previous</span>`;
+
+      // Employment Type
+      const empType = item.employment_type ? escapeHtml(item.employment_type) : '';
+      const typeBadgeHtml = empType ? `<span class="emp-type-tag">${empType}</span>` : '';
+
+      // Role / Designation
+      const desig = escapeHtml(item.designation || item.current_designation || item.position || 'Role / Designation');
+
+      // Helper to format ISO/date string cleanly e.g. "2026-09-01" -> "Sep 1, 2026"
+      function formatDate(dateStr) {
+        if (!dateStr || typeof dateStr !== 'string') return '';
+        const trimmed = dateStr.trim();
+        if (trimmed.toLowerCase() === 'present' || trimmed.toLowerCase() === 'current') return 'Present';
+        const match = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+        if (match) {
+          const year = match[1];
+          const monthIdx = parseInt(match[2], 10) - 1;
+          const day = parseInt(match[3], 10);
+          const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          if (monthIdx >= 0 && monthIdx < 12) {
+            return `${months[monthIdx]} ${day}, ${year}`;
+          }
+        }
+        return escapeHtml(trimmed);
+      }
+
+      // Dates
+      const joiningDate = formatDate(item.joining_date);
+      let workedTill = formatDate(item.worked_till_date);
+      if (isCurrent || !workedTill) {
+        workedTill = isCurrent ? 'Present' : '';
+      }
+      let datesStr = '';
+      if (joiningDate && workedTill) {
+        datesStr = `${joiningDate} — ${workedTill}`;
+      } else if (joiningDate) {
+        datesStr = `From ${joiningDate}`;
+      } else if (workedTill) {
+        datesStr = `Until ${workedTill}`;
+      }
+
+      // Verification Section (Direct Backend Contract Consumption)
+      const verif = (item.verification && typeof item.verification === 'object') ? item.verification : {};
+      const highestLevel = verif.highest_level;
+      const highestLabel = verif.highest_level_label || (highestLevel ? `Level ${highestLevel}` : null);
+
+      const levelsObj = verif.levels || {};
+      const l1 = Boolean(levelsObj.level1);
+      const l2 = Boolean(levelsObj.level2);
+      const l3 = Boolean(levelsObj.level3);
+      const l4 = Boolean(levelsObj.level4);
+
+      const completedLevels = [];
+      const notCompletedLevels = [];
+      if (l1) completedLevels.push('L1'); else notCompletedLevels.push('L1');
+      if (l2) completedLevels.push('L2'); else notCompletedLevels.push('L2');
+      if (l3) completedLevels.push('L3'); else notCompletedLevels.push('L3');
+      if (l4) completedLevels.push('L4'); else notCompletedLevels.push('L4');
+
+      const levelPillsHtml = `
+        <div class="emp-level-pill ${l1 ? 'verified' : 'unverified'}" aria-label="Level 1 ${l1 ? 'Completed' : 'Not completed'}" title="Level 1: ${l1 ? 'Completed' : 'Not completed'}">${l1 ? '✓' : '○'} L1</div>
+        <div class="emp-level-pill ${l2 ? 'verified' : 'unverified'}" aria-label="Level 2 ${l2 ? 'Completed' : 'Not completed'}" title="Level 2: ${l2 ? 'Completed' : 'Not completed'}">${l2 ? '✓' : '○'} L2</div>
+        <div class="emp-level-pill ${l3 ? 'verified' : 'unverified'}" aria-label="Level 3 ${l3 ? 'Completed' : 'Not completed'}" title="Level 3: ${l3 ? 'Completed' : 'Not completed'}">${l3 ? '✓' : '○'} L3</div>
+        <div class="emp-level-pill ${l4 ? 'verified' : 'unverified'}" aria-label="Level 4 ${l4 ? 'Completed' : 'Not completed'}" title="Level 4: ${l4 ? 'Completed' : 'Not completed'}">${l4 ? '✓' : '○'} L4</div>
+      `;
+
+      const summarySummaryHtml = `
+        <div class="emp-verif-summary-text" style="font-size: 11.5px; color: #a1a1aa; margin-top: 6px;">
+          ${completedLevels.length > 0 ? `<span style="color: #34d399;">Completed: ${completedLevels.join(', ')}</span>` : '<span style="color: #a1a1aa;">Completed: None</span>'}
+          ${notCompletedLevels.length > 0 ? `<span style="margin-left: 10px; color: #71717a;">Not completed: ${notCompletedLevels.join(', ')}</span>` : ''}
+        </div>
+      `;
+
+      // Company Verification
+      const compVerif = (item.company_verification && typeof item.company_verification === 'object') ? item.company_verification : {};
+      
+      // Company Claim Status (Decoupled from domain verification)
+      const rawClaimStatus = (compVerif.claim_status !== undefined && compVerif.claim_status !== null) ? compVerif.claim_status : item.claim_status;
+      let claimStatusHtml = '';
+      if (rawClaimStatus === 1 || rawClaimStatus === '1' || rawClaimStatus === true) {
+        claimStatusHtml = `<div class="emp-comp-verif-status claimed" style="color: #34d399;">✓ Claimed Company</div>`;
+      } else if (rawClaimStatus === 0 || rawClaimStatus === '0' || rawClaimStatus === false) {
+        claimStatusHtml = `<div class="emp-comp-verif-status unclaimed" style="color: #f59e0b;">○ Not Claimed</div>`;
+      } else {
+        claimStatusHtml = `<div class="emp-comp-verif-status unknown" style="color: #a1a1aa;">○ Claim Status Unknown</div>`;
+      }
+
+      // Company Domain Verification
+      const compIsVerified = compVerif.is_verified;
+      let compVerifHtml = '';
+      if (compIsVerified === true) {
+        compVerifHtml = `<div class="emp-comp-verif-status verified">✓ Company domain verified</div>`;
+      } else if (compIsVerified === false) {
+        compVerifHtml = `<div class="emp-comp-verif-status unverified">⚠ Company domain not verified</div>`;
+      } else {
+        compVerifHtml = `<div class="emp-comp-verif-status unverified" style="color: #a1a1aa;">○ Company domain status unknown</div>`;
+      }
+
+      // Evidence Availability
+      const evidence = (item.evidence && typeof item.evidence === 'object') ? item.evidence : {};
+      const hasSalaryEv = Boolean(evidence.salary);
+      const hasDocEv = Boolean(evidence.document);
+      const hasRevEv = Boolean(evidence.review);
+
+      // Skills
+      let skillsArray = [];
+      if (Array.isArray(item.skills)) {
+        skillsArray = item.skills.map(s => (typeof s === 'object' && s.name ? s.name : String(s))).filter(Boolean);
+      } else if (typeof item.skills === 'string' && item.skills.trim()) {
+        skillsArray = item.skills.split(',').map(s => s.trim()).filter(Boolean);
+      }
+
+      // Department
+      const dept = (item.department && typeof item.department === 'string') ? escapeHtml(item.department) : null;
+
+      // CTA: url exists -> show View Employment; url absent -> omit CTA
+      const url = (item.url && item.url !== '#') ? item.url : null;
+      const ctaHtml = url ? `<a href="${url}" target="_blank" rel="noopener noreferrer" class="card-action-btn">View Employment →</a>` : '';
+
+      return `
+        <div class="job-card employment-card">
+          <div class="emp-header">
+            <div class="emp-company-group">
+              ${companyLogo ? `<img src="${escapeHtml(companyLogo)}" class="emp-logo" alt="${companyName}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" /><div class="emp-logo-fallback" style="display:none;">${escapeHtml(initials)}</div>` : `<div class="emp-logo-fallback">${escapeHtml(initials)}</div>`}
+              <div>
+                <h4 class="emp-company-name">${companyName}</h4>
+                <div class="emp-status-meta">
+                  ${statusBadgeHtml}
+                  ${typeBadgeHtml}
+                  ${dept ? `<span class="emp-type-tag">🏢 ${dept}</span>` : ''}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <h3 class="emp-role-title">${desig}</h3>
+          ${datesStr ? `<div class="emp-dates">📅 ${datesStr}</div>` : ''}
+
+          <!-- Employment Verification Section -->
+          <div class="emp-section">
+            <div class="emp-section-title">
+              <span>Employment Verification</span>
+              ${highestLevel ? `<span class="emp-highest-badge">✓ Verified — ${escapeHtml(highestLabel)}</span>` : `<span class="emp-highest-badge unverified">○ Not Verified</span>`}
+            </div>
+            <div class="emp-levels-grid">
+              ${levelPillsHtml}
+            </div>
+            ${summarySummaryHtml}
+          </div>
+
+          <!-- Company Verification Section -->
+          <div class="emp-section">
+            <div class="emp-section-title">
+              <span>Company Verification</span>
+            </div>
+            ${claimStatusHtml}
+            ${compVerifHtml}
+          </div>
+
+          <!-- Evidence Section -->
+          <div class="emp-section">
+            <div class="emp-section-title">
+              <span>Evidence</span>
+            </div>
+            <div class="emp-evidence-row">
+              <span class="emp-evidence-item">Salary: ${hasSalaryEv ? '<strong class="icon-yes">✓ Available</strong>' : '<span class="icon-no">○ Not added</span>'}</span>
+              <span class="emp-evidence-item">Documents: ${hasDocEv ? '<strong class="icon-yes">✓ Available</strong>' : '<span class="icon-no">○ Not added</span>'}</span>
+              <span class="emp-evidence-item">Reviews: ${hasRevEv ? '<strong class="icon-yes">✓ Available</strong>' : '<span class="icon-no">○ Not available</span>'}</span>
+            </div>
+          </div>
+
+          <!-- Skills Section -->
+          ${skillsArray.length > 0 ? `
+            <div class="emp-section">
+              <div class="emp-section-title">
+                <span>Skills</span>
+              </div>
+              <div class="emp-skills-row">
+                ${skillsArray.map(s => `<span class="emp-skill-pill">${escapeHtml(s)}</span>`).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          <div class="card-footer">
+            <span class="match-reason">${escapeHtml(item.match_reason || 'Verified Employment Record')}</span>
+            ${ctaHtml}
+          </div>
+        </div>
+      `;
+    }
+
     function renderSingleCardHtml(item, resultType) {
-      if (resultType === 'education' || item.qualification || item.university_name) {
+      // Direct explicit Employment Card detection strictly requiring explicit resultType or core employment contract fields
+      const isEmploymentObject = Boolean(
+        resultType === 'employment' ||
+        resultType === 'employment_history' ||
+        (item && (item.employment_status || item.company_verification))
+      );
+
+      if (isEmploymentObject) {
+        return renderEmploymentCardHtml(item);
+      } else if (resultType === 'education' || item.qualification || item.university_name) {
         const qualification = item.qualification || item.course_name || 'Degree / Qualification';
         const institution = item.institution || item.university_name || 'Educational Institution';
         const courseType = item.course_type || 'Full Time';
@@ -2313,7 +3353,10 @@
                 <h4 class="card-title">${escapeHtml(title)}</h4>
                 <p class="card-subtitle">${escapeHtml(company)}${department ? ' • ' + escapeHtml(department) : ''}</p>
               </div>
-              ${mode ? `<span class="badge badge-teal">${escapeHtml(mode)}</span>` : ''}
+              <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                ${mode ? `<span class="badge badge-teal">${escapeHtml(mode)}</span>` : ''}
+                ${(item.urgent == 1 || item.urgent === true || String(item.urgent).toLowerCase() === 'true') ? `<span class="badge badge-urgent" style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px;">⚡ Urgent</span>` : ''}
+              </div>
             </div>
             <div class="card-details">
               ${location ? `<span class="detail-tag">📍 ${escapeHtml(location)}</span>` : ''}
@@ -2337,11 +3380,22 @@
           </div>
         `;
       } else {
-        // Candidate / People card
-        const name = (item.name && item.name.trim()) ? item.name.trim() : 'Professional';
+        // Candidate / People / Employment card
+        const desig = (item.designation || item.current_designation || item.position || item.headline || '').trim();
+        const rawName = (item.name && item.name.trim()) ? item.name.trim() : '';
+        const name = (rawName && rawName.toLowerCase() !== 'professional') ? rawName : (desig || 'Professional');
         const rawCompany = (item.company || item.current_company_name || '').trim();
         const displayCompany = (rawCompany && rawCompany.toLowerCase() !== 'not specified' && rawCompany.toLowerCase() !== 'unknown') ? rawCompany : '';
-        const pos = (displayCompany ? `${item.current_designation || item.position || item.headline || 'Professional'} at ${displayCompany}` : (item.current_designation || item.position || item.headline || 'Professional'));
+
+        let pos = '';
+        if (desig && desig.toLowerCase() !== name.toLowerCase()) {
+          pos = displayCompany ? `${desig} at ${displayCompany}` : desig;
+        } else if (displayCompany) {
+          pos = desig ? `${desig} at ${displayCompany}` : `Professional at ${displayCompany}`;
+        } else {
+          pos = desig || 'Professional';
+        }
+
         const locParts = [item.city, item.state, item.country].filter(Boolean);
         const loc = locParts.length > 0 ? locParts.join(', ') : (item.location || '');
         const exp = item.experience_label || (item.experience ? `${item.experience} yrs` : '');
@@ -2352,6 +3406,43 @@
 
         const rawId = item.cc_id || item.candidate_id || item.id || '';
         const ccId = rawId ? (String(rawId).startsWith('CC-') ? rawId : `CC-${rawId}`) : '';
+
+        // Verification & Level Badges resolution (Level 1, 2, 3, 4)
+        const verif = (item.verification && typeof item.verification === 'object') ? item.verification : {};
+        const vp = (item.verificationProcess && typeof item.verificationProcess === 'object') ? item.verificationProcess : ((verif.verificationProcess && typeof verif.verificationProcess === 'object') ? verif.verificationProcess : {});
+        
+        let levelNum = item.verification_level || item.highest_level || item.level || verif.highest_completed_level || verif.level || null;
+        
+        // Dynamic check for highest active level from verificationProcess (Level 4 down to 1)
+        if (!levelNum && vp) {
+          if (vp.level4 === true || vp.level4 === 1 || vp.level4 === "1" || String(vp.level4).toLowerCase() === "true") levelNum = 4;
+          else if (vp.level3 === true || vp.level3 === 1 || vp.level3 === "1" || String(vp.level3).toLowerCase() === "true") levelNum = 3;
+          else if (vp.level2 === true || vp.level2 === 1 || vp.level2 === "1" || String(vp.level2).toLowerCase() === "true") levelNum = 2;
+          else if (vp.level1 === true || vp.level1 === 1 || vp.level1 === "1" || String(vp.level1).toLowerCase() === "true") levelNum = 1;
+        }
+        
+        if (!levelNum) {
+          if (item.approved === '1' && item.status === '1') {
+            levelNum = 3;
+          }
+        }
+
+        const levelNames = {
+          1: "Level 1 (Work Identity)",
+          2: "Level 2 (Domain Verified)",
+          3: "Level 3 (Employment Verified)",
+          4: "Level 4 (Salary Verified)"
+        };
+
+        let verifBadgeHtml = '';
+        if (levelNum && levelNames[levelNum]) {
+          verifBadgeHtml = `<span class="detail-tag" style="background: rgba(0, 194, 168, 0.15); color: #00C2A8; border: 1px solid rgba(0, 194, 168, 0.35); font-weight: 600;">🛡️ Level ${levelNum} Verified</span>`;
+        } else if (item.approved === '0' || item.status === '0' || verif.status === 'not_verified') {
+          verifBadgeHtml = `<span class="detail-tag" style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); font-weight: 500;">⚠️ Not Verified</span>`;
+        } else {
+          verifBadgeHtml = `<span class="detail-tag" style="background: rgba(161, 161, 170, 0.15); color: #a1a1aa; border: 1px solid rgba(161, 161, 170, 0.35); font-weight: 500;">❓ Status Unknown</span>`;
+        }
+
 
         return `
           <div class="job-card candidate-card">
@@ -2372,6 +3463,7 @@
               ${exp ? `<span class="badge badge-navy">${escapeHtml(exp)}</span>` : ''}
             </div>
             <div class="card-details">
+              ${verifBadgeHtml}
               ${loc ? `<span class="detail-tag">📍 ${escapeHtml(loc)}</span>` : ''}
               ${skills ? `<span class="detail-tag">🛠️ ${escapeHtml(skills)}</span>` : ''}
             </div>
@@ -2416,7 +3508,15 @@
       const totalRes = store ? store.totalResults : (pagination ? pagination.total_results : results.length);
       const startIdx = store ? ((store.currentPage - 1) * store.pageSize + 1) : (pagination ? pagination.start_index : 1);
       const endIdx = store ? Math.min(store.currentPage * store.pageSize, store.totalResults) : (pagination ? pagination.end_index : results.length);
-      const headerTitle = (resultType === 'candidates' || resultType === 'people') ? 'Matching Professionals' : 'Recommended Jobs';
+      const rt = (resultType || '').toLowerCase();
+      let headerTitle = 'Recommended Jobs';
+      if (rt === 'employment_verification') {
+        headerTitle = 'Employment Verification';
+      } else if (rt === 'employment' || rt === 'employment_history') {
+        headerTitle = 'Verified Employment History';
+      } else if (rt === 'candidates' || rt === 'people') {
+        headerTitle = 'Matching Professionals';
+      }
 
       if (totalRes > 0) {
         html += `
