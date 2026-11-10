@@ -1039,7 +1039,7 @@ def test_phase4_malformed_generation_handled_safely():
     assert [j["job_id"] for j in saved_after_str["all_recs"]] == [f"N{i}" for i in range(1, 6)]
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_phase4_employer_search_generation_race_and_role_isolation():
     """
     Test 3: Employer searches are generation-aware with role isolation.
@@ -1183,4 +1183,272 @@ async def test_phase4_employer_search_generation_race_and_role_isolation():
         assert saved_employee["search_gen"] == 1
         assert saved_employee["all_recs"][0]["job_id"] == "EMP_JOB_1"
         assert get_search_generation(sess_id, role="employee") == 1
+
+
+class TestPhase5BJobFollowups:
+    """Step 5B: Multi-turn job follow-ups on active search results."""
+
+    @pytest.fixture
+    def setup_job_session(self):
+        from backend.utils.session_state import set_recommendation_session, reset_search_context
+        from backend.recommendation.models import ScoreResult, ExplanationResult
+
+        class MockRec:
+            def __init__(self, job_id, rank, title, company, location, mode, salary, desc, reqs):
+                self.job_id = job_id
+                self.global_rank = rank
+                self.title = title
+                self.overall_score = 90.0
+                self.score_result = ScoreResult(
+                    overall_score=90.0,
+                    recommendation_level="Good Match",
+                    skill_score=90.0,
+                    experience_score=90.0,
+                    location_score=90.0,
+                    salary_score=90.0,
+                    title_score=90.0,
+                    weight_skill=0.4,
+                    weight_experience=0.2,
+                    weight_location=0.1,
+                    weight_salary=0.15,
+                    weight_title=0.15
+                )
+                self.explanation_result = ExplanationResult(
+                    summary=f"{title} at {company}",
+                    strengths=["Python", "FastAPI"],
+                    weaknesses=[],
+                    recommendation_level="Good Match",
+                    overall_score=90.0
+                )
+                self.recommendation_reasons = []
+                self.raw_data = {
+                    "id": job_id,
+                    "job_title": title,
+                    "company_name": company,
+                    "location": location,
+                    "job_mode_name": mode,
+                    "salary": salary,
+                    "job_description": desc,
+                    "requirements": reqs,
+                    "experience_name": "2-4 Years",
+                }
+
+        recs = [
+            MockRec(101, 1, "Python Developer", "Alpha Innovations", "Delhi", "Work from Office", 800000, "Develop APIs with FastAPI", "Python, FastAPI, SQL"),
+            MockRec(102, 2, "Backend Engineer", "Beta Cloud Systems", "Bangalore", "Work from Home", 1200000, "Distributed backend microservices", "Go, Python, AWS"),
+            MockRec(103, 3, "Data Scientist", "Gamma Labs", "Mumbai", "Hybrid", 1500000, "Build ML models", "Python, PyTorch"),
+        ]
+
+        def _init(session_id="test_sess_5b"):
+            reset_search_context(session_id, role="employee")
+            set_recommendation_session(
+                session_id=session_id,
+                query_key="cand_1",
+                ranked_jobs=recs,
+                current_page=1,
+                page_size=5,
+                total_jobs=3,
+                role="employee"
+            )
+            return session_id, recs
+
+        return _init
+
+    @pytest.mark.anyio
+    async def test_what_about_the_second_one_resolves(self, setup_job_session):
+        from backend.api.employee import handle_employee_context
+        sess_id, _ = setup_job_session("sess_5b_ord2")
+
+        res = await handle_employee_context("What about the second one?", session_id=sess_id)
+        assert res is not None
+        assert res.get("result_type") == "job_detail"
+        assert res.get("global_rank") == 2
+        assert res.get("job_id") == 102
+        db_ctx = res.get("db_context", "")
+        assert "Beta Cloud Systems" in db_ctx
+        assert "Backend Engineer" in db_ctx
+        assert "Work from Home" in db_ctx
+
+    @pytest.mark.anyio
+    async def test_tell_me_more_about_the_first_job_resolves(self, setup_job_session):
+        from backend.api.employee import handle_employee_context
+        sess_id, _ = setup_job_session("sess_5b_ord1")
+
+        res = await handle_employee_context("Tell me more about the first job", session_id=sess_id)
+        assert res is not None
+        assert res.get("result_type") == "job_detail"
+        assert res.get("global_rank") == 1
+        assert res.get("job_id") == 101
+        db_ctx = res.get("db_context", "")
+        assert "Alpha Innovations" in db_ctx
+        assert "Python Developer" in db_ctx
+        assert "Develop APIs with FastAPI" in db_ctx
+
+    @pytest.mark.anyio
+    async def test_pronoun_followup_resolves_last_referenced_job(self, setup_job_session):
+        from backend.api.employee import handle_employee_context
+        from backend.utils.session_state import update_last_referenced_job_id
+        sess_id, _ = setup_job_session("sess_5b_pronoun")
+
+        # Set last referenced job to job #2 (102)
+        update_last_referenced_job_id(sess_id, 102, role="employee")
+
+        res = await handle_employee_context("Is that one remote?", session_id=sess_id)
+        assert res is not None
+        assert res.get("result_type") == "job_detail"
+        assert res.get("job_id") == 102
+        db_ctx = res.get("db_context", "")
+        assert "Beta Cloud Systems" in db_ctx
+        assert "Work from Home" in db_ctx
+
+    @pytest.mark.anyio
+    async def test_comparison_followup_resolves_both_jobs(self, setup_job_session):
+        from backend.api.employee import handle_employee_context
+        sess_id, _ = setup_job_session("sess_5b_compare")
+
+        res = await handle_employee_context("Compare the first and second ones", session_id=sess_id)
+        assert res is not None
+        assert res.get("result_type") == "job_comparison"
+        db_ctx = res.get("db_context", "")
+        assert "Job #1" in db_ctx
+        assert "Job #2" in db_ctx
+        assert "Alpha Innovations" in db_ctx
+        assert "Beta Cloud Systems" in db_ctx
+
+    @pytest.mark.anyio
+    async def test_ordinal_outside_available_range_returns_error(self, setup_job_session):
+        from backend.api.employee import handle_employee_context
+        sess_id, _ = setup_job_session("sess_5b_oob")
+
+        res = await handle_employee_context("What about the fifth job?", session_id=sess_id)
+        assert res is not None
+        assert res.get("result_type") == "job_detail_error"
+        db_ctx = res.get("db_context", "")
+        assert "not have a 5th" in db_ctx.lower() or "not available" in db_ctx.lower() or "5th" in db_ctx.lower()
+
+    @pytest.mark.anyio
+    async def test_no_prior_context_returns_error(self):
+        from backend.api.employee import handle_employee_context
+        from backend.utils.session_state import reset_search_context
+        sess_id = "sess_5b_no_ctx"
+        reset_search_context(sess_id, role="employee")
+
+        res = await handle_employee_context("What about the second one?", session_id=sess_id)
+        assert res is not None
+        assert res.get("result_type") == "job_detail_error"
+        db_ctx = res.get("db_context", "")
+        assert "recent job recommendation" in db_ctx.lower() or "no previous search" in db_ctx.lower() or "recent job" in db_ctx.lower()
+
+    @pytest.mark.anyio
+    async def test_genuine_new_search_resets_and_executes(self, setup_job_session):
+        from backend.api.employee import handle_employee_context
+        from unittest.mock import patch, AsyncMock
+        sess_id, _ = setup_job_session("sess_5b_new_search")
+
+        parsed_new = {
+            "keyword": "Java Developer",
+            "location": "Mumbai",
+            "is_search_intent": True,
+            "search_target": "JOBS",
+            "query_type": "NEW_SEARCH",
+        }
+        with patch("backend.api.employee.execute_hybrid_job_search", new=AsyncMock(return_value=([], None))):
+            res = await handle_employee_context("Now search for Java developer jobs in Mumbai", session_id=sess_id, parsed_query=parsed_new)
+            assert res is not None
+            assert res.get("result_type") != "job_detail"
+            assert res.get("result_type") != "job_comparison"
+
+    @pytest.mark.anyio
+    async def test_three_job_comparison_supported(self, setup_job_session):
+        from backend.api.employee import handle_employee_context
+        sess_id, _ = setup_job_session("sess_5b_compare_three")
+
+        res = await handle_employee_context("Compare the first, second, and third jobs", session_id=sess_id)
+        assert res is not None
+        assert res.get("result_type") == "job_comparison"
+        db_ctx = res.get("db_context", "")
+        # All three requested jobs must be present in comparison context without silent truncation
+        assert "Job #1" in db_ctx
+        assert "Alpha Innovations" in db_ctx
+        assert "Job #2" in db_ctx
+        assert "Beta Cloud Systems" in db_ctx
+        assert "Job #3" in db_ctx
+        assert "Gamma Labs" in db_ctx
+        assert "Compare the 3 jobs clearly" in db_ctx
+
+    @pytest.mark.anyio
+    async def test_search_a_then_search_b_isolation(self, setup_job_session):
+        from backend.api.employee import handle_employee_context
+        from backend.utils.session_state import set_recommendation_session
+        from backend.recommendation.models import ScoreResult, ExplanationResult
+
+        class MockRecB:
+            def __init__(self, job_id, rank, title, company):
+                self.job_id = job_id
+                self.global_rank = rank
+                self.title = title
+                self.overall_score = 95.0
+                self.score_result = ScoreResult(
+                    overall_score=95.0,
+                    recommendation_level="Great Match",
+                    skill_score=95.0,
+                    experience_score=95.0,
+                    location_score=95.0,
+                    salary_score=95.0,
+                    title_score=95.0,
+                    weight_skill=0.4,
+                    weight_experience=0.2,
+                    weight_location=0.1,
+                    weight_salary=0.15,
+                    weight_title=0.15,
+                )
+                self.explanation_result = ExplanationResult(
+                    summary=f"{title} at {company}",
+                    strengths=["Java", "Spring"],
+                    weaknesses=[],
+                    recommendation_level="Great Match",
+                    overall_score=95.0,
+                )
+                self.recommendation_reasons = []
+                self.raw_data = {
+                    "id": job_id,
+                    "job_title": title,
+                    "company_name": company,
+                    "location": "Mumbai",
+                    "job_mode_name": "Work from Office",
+                    "salary": 1800000,
+                    "job_description": "Enterprise Java systems",
+                    "requirements": "Java, Spring Boot",
+                    "experience_name": "5+ Years",
+                }
+
+        # Step 1: Search A active results (Job 101, 102, 103)
+        sess_id, _ = setup_job_session("sess_5b_isolation")
+
+        # Step 2: Search B executes and replaces active recommendations (Job 201, 202)
+        recs_b = [
+            MockRecB(201, 1, "Senior Java Architect", "Zeta Enterprise"),
+            MockRecB(202, 2, "Lead Java Developer", "Omega Solutions"),
+        ]
+        set_recommendation_session(
+            session_id=sess_id,
+            query_key="cand_java",
+            ranked_jobs=recs_b,
+            current_page=1,
+            page_size=5,
+            total_jobs=2,
+            role="employee",
+        )
+
+        # Step 3: Follow-up query "What about the second one?"
+        res = await handle_employee_context("What about the second one?", session_id=sess_id)
+        assert res is not None
+        assert res.get("result_type") == "job_detail"
+        assert res.get("global_rank") == 2
+        assert res.get("job_id") == 202
+        db_ctx = res.get("db_context", "")
+        # Must resolve Search B's second job, never Search A's second job
+        assert "Omega Solutions" in db_ctx
+        assert "Lead Java Developer" in db_ctx
+        assert "Beta Cloud Systems" not in db_ctx
 

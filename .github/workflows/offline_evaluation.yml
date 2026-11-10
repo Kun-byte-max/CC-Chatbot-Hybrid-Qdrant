@@ -1,0 +1,81 @@
+name: Offline Evaluation & Quality Gate Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  offline-evaluation:
+    name: Offline Evaluation & Semantic Regression
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Create Reports Directory
+        run: |
+          mkdir -p reports
+
+      - name: Run Targeted Pipeline Semantic Regression
+        id: run_pipeline_tests
+        # Do not use '|| true'. Allow step to record failure if tests fail.
+        # continue-on-error: true ensures subsequent diagnostic generation runs.
+        run: |
+          python -m pytest backend/tests/test_pipeline_semantic_eval.py --junitxml=reports/pipeline_results.xml
+        continue-on-error: true
+
+      - name: Generate Diagnostic Evaluation Report
+        id: generate_report
+        # Runs if reports directory exists and pipeline tests completed (success or failure)
+        if: always() && steps.run_pipeline_tests.outcome != 'skipped'
+        run: |
+          python -m backend.tests.run_evaluation_report \
+            --junit-xml reports/pipeline_results.xml \
+            --output-path reports/eval_synthetic_summary_report.md \
+            --overwrite
+
+      - name: Upload Evaluation Artifacts
+        id: upload_artifacts
+        # Always upload diagnostic reports and test results if available
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collarcheck-offline-evaluation-report
+          path: reports/
+          if-no-files-found: warn
+
+      - name: Enforce Quality Gate & Verify Test Outcome
+        # Strictly enforces that pipeline regression passed and quality gate passed
+        if: always()
+        run: |
+          # 1. Fail immediately if pipeline regression tests failed or errored
+          if [ "${{ steps.run_pipeline_tests.outcome }}" != "success" ]; then
+            echo "::error::Pipeline semantic regression tests failed or errored."
+            exit 1
+          fi
+
+          # 2. Fail if report generation step itself failed
+          if [ "${{ steps.generate_report.outcome }}" != "success" ]; then
+            echo "::error::Diagnostic report generation failed."
+            exit 1
+          fi
+
+          # 3. Enforce quality gates (PASS=0, FAIL=1, INCONCLUSIVE=2)
+          python -m backend.tests.run_evaluation_report \
+            --junit-xml reports/pipeline_results.xml \
+            --enforce-gate

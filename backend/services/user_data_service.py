@@ -10,6 +10,7 @@ Phase 4:
 import logging
 from typing import Dict, Any, List, Set, Optional, Union
 from dataclasses import dataclass, field
+from starlette.concurrency import run_in_threadpool
 
 from backend.services import platform_api
 from backend.services.user_data_intent_parser import UserIntent, parse_user_data_intents, parse_user_data_intents_async, detect_requested_level
@@ -491,7 +492,7 @@ async def process_query_resolution_async(
         return result
 
     for ep_key in endpoints:
-        resp = fetch_endpoint_data(ep_key, token=token, user_slug=user_slug, user_id=user_id)
+        resp = await run_in_threadpool(fetch_endpoint_data, ep_key, token=token, user_slug=user_slug, user_id=user_id)
         result.api_responses[ep_key] = resp
         result.api_call_count += 1
 
@@ -562,9 +563,9 @@ async def handle_query(
     if explicit_lvl is not None:
         effective_requested_level = explicit_lvl
         if session_id:
-            set_pending_requested_level(session_id, explicit_lvl)
+            await run_in_threadpool(set_pending_requested_level, session_id, explicit_lvl, role="employee", user_id=user_id)
     elif session_id:
-        effective_requested_level = get_pending_requested_level(session_id)
+        effective_requested_level = await run_in_threadpool(get_pending_requested_level, session_id, role="employee", user_id=user_id)
     else:
         effective_requested_level = None
 
@@ -575,11 +576,21 @@ async def handle_query(
             resolution.intents.insert(0, UserIntent.EMPLOYMENT_VERIFICATION)
 
     if not resolution.intents:
-        if session_id and (effective_requested_level is not None or get_selected_employment_context(session_id) or get_session_option_mapping(session_id)):
+        has_active_session_ctx = False
+        if session_id:
+            if effective_requested_level is not None:
+                has_active_session_ctx = True
+            else:
+                has_active_session_ctx = await run_in_threadpool(
+                    lambda: bool(get_selected_employment_context(session_id, role="employee", user_id=user_id) or get_session_option_mapping(session_id, role="employee", user_id=user_id))
+                )
+        if has_active_session_ctx:
             resolution.intents = [UserIntent.EMPLOYMENT_VERIFICATION]
             ep_key = INTENT_ENDPOINT_MAP[UserIntent.EMPLOYMENT_VERIFICATION]
             if ep_key not in resolution.api_responses:
-                resolution.api_responses[ep_key] = fetch_endpoint_data(ep_key, token=token, user_slug=user_slug, user_id=user_id)
+                resolution.api_responses[ep_key] = await run_in_threadpool(
+                    fetch_endpoint_data, ep_key, token=token, user_slug=user_slug, user_id=user_id
+                )
         else:
             return ServiceResponse(handled=False)
 
@@ -592,7 +603,9 @@ async def handle_query(
             eps = [ep_key] if isinstance(ep_key, str) else list(ep_key)
             for e in eps:
                 if e not in resolution.api_responses:
-                    resolution.api_responses[e] = fetch_endpoint_data(e, token=token, user_slug=user_slug, user_id=user_id)
+                    resolution.api_responses[e] = await run_in_threadpool(
+                        fetch_endpoint_data, e, token=token, user_slug=user_slug, user_id=user_id
+                    )
 
         if intent == UserIntent.PROFILE_SKILLS:
             prof_resp = resolution.api_responses.get("user-profile")
@@ -621,14 +634,17 @@ async def handle_query(
             raw_api_resp = resolution.api_responses.get(primary_ep, {}) if primary_ep else {}
             extracted_by_intent[intent] = extract_by_intent(intent, raw_api_resp)
 
-    res_tuple = format_multi_intent_response(
+    res_tuple = await run_in_threadpool(
+        format_multi_intent_response,
         intents,
         extracted_by_intent,
         resolution.api_responses,
         query=query,
         session_id=session_id,
         return_metadata=True,
-        requested_level=resolution.requested_level
+        requested_level=resolution.requested_level,
+        user_id=user_id,
+        role="employee",
     )
     if isinstance(res_tuple, tuple):
         reply_text, selection_metadata = res_tuple
@@ -686,7 +702,7 @@ async def handle_query(
 
         from backend.services.user_data_formatter import resolve_employment_selection_context
         filtered_history, sel_meta, matched_comp = resolve_employment_selection_context(
-            query, history, session_id=session_id, consume_key=True, requested_level=resolution.requested_level
+            query, history, session_id=session_id, consume_key=True, requested_level=resolution.requested_level, user_id=user_id, role="employee"
         )
         
         # Determine company records to process for results[] payload:
@@ -843,7 +859,7 @@ async def handle_query(
                 })
 
     if session_id and selection_metadata is None and effective_requested_level is not None and len(results_list) == 1:
-        clear_pending_requested_level(session_id)
+        await run_in_threadpool(clear_pending_requested_level, session_id, role="employee", user_id=user_id)
 
     return ServiceResponse(
         handled=True,

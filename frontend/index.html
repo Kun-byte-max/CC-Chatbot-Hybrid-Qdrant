@@ -1088,6 +1088,14 @@
       background: var(--cc-teal-dk);
     }
 
+    .send-btn.stop-btn {
+      background: #ef4444;
+    }
+
+    .send-btn.stop-btn:hover {
+      background: #dc2626;
+    }
+
     .send-btn:disabled {
       background: #e5e5e5;
       cursor: not-allowed;
@@ -1857,7 +1865,7 @@
           <button class="action-btn" onclick="clearChat()" title="New chat">🗑️</button>
           <textarea id="msgInput" rows="1" placeholder="Message CollarCheck AI..." onkeydown="handleKey(event)"
             oninput="autoGrow(this)"></textarea>
-          <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+          <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send message" aria-label="Send message">
             <svg viewBox="0 0 24 24">
               <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
             </svg>
@@ -1900,6 +1908,8 @@
     const CC_WAPI_BASE_URL = 'https://api.collarcheck.com/wapi';
     let apiKey = sessionStorage.getItem('cc_api_key') || '';
     let isWaiting = false;
+    let currentTurnId = 0;
+    let activeAbortController = null;
 
     // ── PROTOTYPE AUTH STATE & LOGIC (PROTOTYPE ONLY) ──
     let authToken = localStorage.getItem('cc_auth_token') || '';
@@ -2027,8 +2037,20 @@
       localStorage.removeItem('cc_user');
       localStorage.removeItem('cc_login_response');
       localStorage.removeItem('user_slug');
+      sessionStorage.removeItem('cc_session_id');
       clearChat();
       initAuthState();
+    }
+
+    function persistAuthoritativeSessionId(sid) {
+      if (typeof sid === 'string' && sid.trim()) {
+        const clean = sid.trim();
+        if (clean.length >= 8 && clean.length <= 128 && /^[a-zA-Z0-9_\-]+$/.test(clean) && !['default_session', 'none', 'null'].includes(clean.toLowerCase())) {
+          sessionStorage.setItem('cc_session_id', clean);
+          return clean;
+        }
+      }
+      return null;
     }
 
     let userLocationObj = null;
@@ -2433,7 +2455,62 @@
     }
 
     function handleKey(e) {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+      if (e.key === 'Escape') {
+        if (isWaiting) {
+          if (e && e.preventDefault) e.preventDefault();
+          stopGeneration();
+        }
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        if (e && e.preventDefault) e.preventDefault();
+        sendMessage();
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isWaiting) {
+        if (e && e.preventDefault) e.preventDefault();
+        stopGeneration();
+      }
+    });
+
+    const SEND_ICON_SVG = '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>';
+    const STOP_ICON_SVG = '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /></svg>';
+
+    function updateSendButtonState(isStreaming) {
+      const sendBtn = document.getElementById('sendBtn');
+      if (!sendBtn) return;
+      document.getElementById('sendBtn').disabled = false;
+      sendBtn.disabled = false;
+      if (isStreaming) {
+        sendBtn.classList.add('stop-btn');
+        sendBtn.setAttribute('title', 'Stop generation');
+        sendBtn.setAttribute('aria-label', 'Stop generation');
+        sendBtn.innerHTML = STOP_ICON_SVG;
+        sendBtn.onclick = function(e) {
+          if (e && e.preventDefault) e.preventDefault();
+          stopGeneration();
+        };
+      } else {
+        sendBtn.classList.remove('stop-btn');
+        sendBtn.setAttribute('title', 'Send message');
+        sendBtn.setAttribute('aria-label', 'Send message');
+        sendBtn.innerHTML = SEND_ICON_SVG;
+        sendBtn.onclick = function(e) {
+          if (e && e.preventDefault) e.preventDefault();
+          sendMessage();
+        };
+      }
+    }
+
+    function stopGeneration() {
+      if (!isWaiting || !activeAbortController) return;
+      try {
+        activeAbortController.abort();
+      } catch (err) {
+        console.warn('[SSE] Error aborting stream:', err);
+      }
     }
 
     function showToast(msg, color = '#1a1a1a') {
@@ -2476,8 +2553,37 @@
 
 
 
+    // ── HTML ESCAPER ──────────────────────────────
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    // ── CARD & EXTERNAL URL SANITIZER ─────────────
+    function sanitizeCardUrl(rawUrl, fallback = '#') {
+      const fb = (fallback !== undefined) ? fallback : '#';
+      if (!rawUrl || typeof rawUrl !== 'string') return fb;
+      const trimmed = rawUrl.trim();
+      // Reject ASCII control characters (0x00-0x1F, 0x7F-0x9F)
+      if (/[\x00-\x1F\x7F-\x9F]/.test(trimmed)) {
+        return fb;
+      }
+      // Allow only https://, http://, safe relative paths starting with single slash (/ not // or /\), and fragment #
+      if (/^(?:https?:\/\/|\/(?![/\\])|#)/i.test(trimmed)) {
+        return escapeHtml(trimmed);
+      }
+      return fb;
+    }
+
     // ── MARKDOWN RENDERER ──────────────────────────
     function renderMarkdown(text) {
+      if (!text || typeof text !== 'string') return '';
+      text = escapeHtml(text);
       // Headers
       text = text.replace(/^### (.+)$/gm, '<h4>$1</h4>');
       text = text.replace(/^## (.+)$/gm, '<h3>$1</h3>');
@@ -2486,8 +2592,18 @@
       text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
       // Action guidance buttons
       text = text.replace(/\[(How to complete Level \d+)\](?!\()/g, '<button type="button" class="quick-chip-btn" style="background: var(--cc-navy, #0B1F3A); color: white; border: 1px solid var(--border-color); padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; margin-top: 6px; margin-bottom: 6px; display: inline-block;" onclick="askChip(\'$1\')">👉 $1</button>');
-      // Links
-      text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color: var(--accent-blue, #2563EB); font-weight: 600;">$1</a>');
+      // Safe Links (whitelist safe schemes: https, http, safe single-slash relative, anchor, mailto; reject //host and /\host)
+      text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, url) => {
+        const trimmedUrl = url.trim();
+        // Reject control characters
+        if (/[\x00-\x1F\x7F-\x9F]/.test(trimmedUrl)) {
+          return `${label} (${trimmedUrl})`;
+        }
+        if (/^(?:https?:\/\/|\/(?![/\\])|#|mailto:)/i.test(trimmedUrl)) {
+          return `<a href="${trimmedUrl}" target="_blank" rel="noopener noreferrer" style="color: var(--accent-blue, #2563EB); font-weight: 600;">${label}</a>`;
+        }
+        return `${label} (${trimmedUrl})`;
+      });
       // Inline code
       text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
       // Lists
@@ -2572,10 +2688,10 @@
 
         if (itemType === 'chat_action') {
           const trustedMsg = registryConfig.message;
-          const safeAction = escapeHtml(trustedMsg).replace(/'/g, "&#39;");
+          const safeAction = escapeHtml(trustedMsg);
           htmlResult += `
             <div class="action-nav-container">
-              <button type="button" onclick="askChip('${safeAction}')" class="action-nav-btn" aria-label="${safeLabel}">
+              <button type="button" data-action-message="${safeAction}" onclick="handleActionNavChip(this)" class="action-nav-btn" aria-label="${safeLabel}">
                 <span>${icon} ${safeLabel}</span>
                 <span class="action-nav-arrow">→</span>
               </button>
@@ -2630,20 +2746,28 @@
         const rawDesc = opt.description ? ` (${opt.description})` : '';
         const fullDisplay = `${rawLabel}${rawDesc}`;
 
-        const safeDisplayLabel = escapeHtml(fullDisplay).replace(/'/g, "&#39;");
-        const safeCompany = escapeHtml(opt.company_name || opt.label || '').replace(/'/g, "&#39;");
+        const safeDisplayLabel = escapeHtml(fullDisplay);
+        const safeCompany = escapeHtml(opt.company_name || opt.label || '');
         const safeCompanyId = opt.company_id ? String(opt.company_id) : '';
 
         if (opt.selection_key) {
-          const safeKey = escapeHtml(opt.selection_key).replace(/'/g, "&#39;");
+          const safeKey = escapeHtml(opt.selection_key);
           htmlResult += `
-            <button type="button" onclick="askEmploymentRecordChip('${safeKey}', '${safeDisplayLabel}')" class="quick-chip-btn" style="background: var(--cc-navy, #0B1F3A); color: white; border: 1px solid var(--border-color); padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;">
+            <button type="button" class="quick-chip-btn selection-record-chip"
+              data-selection-key="${safeKey}"
+              data-display-label="${safeDisplayLabel}"
+              onclick="handleSelectionRecordChip(this)"
+              style="background: var(--cc-navy, #0B1F3A); color: white; border: 1px solid var(--border-color); padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;">
               🏢 ${escapeHtml(rawLabel)}${escapeHtml(rawDesc)}
             </button>
           `;
         } else if (opt.company_name) {
           htmlResult += `
-            <button type="button" onclick="askEmploymentCompanyChip('${safeCompany}', '${safeCompanyId}')" class="quick-chip-btn" style="background: var(--cc-navy, #0B1F3A); color: white; border: 1px solid var(--border-color); padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;">
+            <button type="button" class="quick-chip-btn selection-company-chip"
+              data-company-name="${safeCompany}"
+              data-company-id="${escapeHtml(safeCompanyId)}"
+              onclick="handleSelectionCompanyChip(this)"
+              style="background: var(--cc-navy, #0B1F3A); color: white; border: 1px solid var(--border-color); padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;">
               🏢 ${escapeHtml(rawLabel)}${escapeHtml(rawDesc)}
             </button>
           `;
@@ -2706,12 +2830,193 @@
       if (el) el.remove();
     }
 
+    function createStreamingBotMessage(reqId) {
+      const msgs = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = 'msg bot';
+      if (reqId) div.id = 'msg_' + reqId;
+      div.innerHTML = `
+      <div class="msg-content-wrapper">
+        <div class="msg-avatar">CC</div>
+        <div class="bubble">
+          <div class="bot-status" style="display: none; font-size: 12px; color: #8E8EA0; margin-bottom: 6px; font-style: italic;"></div>
+          <div class="bot-text"></div>
+          <div class="bot-actions"></div>
+          <div class="bot-selection"></div>
+          <div class="bot-cards"></div>
+        </div>
+      </div>`;
+      msgs.appendChild(div);
+      scrollToBottom();
+      return {
+        msgDiv: div,
+        statusEl: div.querySelector('.bot-status'),
+        textEl: div.querySelector('.bot-text'),
+        actionsEl: div.querySelector('.bot-actions'),
+        selectionEl: div.querySelector('.bot-selection'),
+        cardsEl: div.querySelector('.bot-cards')
+      };
+    }
+
+    // ── SSE PARSING & STREAMING UTILITIES ──────────
+    function dispatchSSEBlock(rawBlock, onMessage) {
+      if (!rawBlock || !rawBlock.trim()) return;
+      const lines = rawBlock.split(/\r\n|\r|\n/);
+      let eventType = 'message';
+      let dataLines = [];
+
+      for (const line of lines) {
+        if (!line || line.startsWith(':')) {
+          continue; // heartbeat or SSE comment
+        }
+        if (line.startsWith('event:')) {
+          eventType = line.substring(6).trim();
+        } else if (line.startsWith('data:')) {
+          let dataVal = line.substring(5);
+          if (dataVal.startsWith(' ')) dataVal = dataVal.substring(1);
+          dataLines.push(dataVal);
+        }
+      }
+
+      if (dataLines.length > 0 || eventType !== 'message') {
+        const rawData = dataLines.join('\n');
+        let parsedData = rawData;
+        if (rawData) {
+          try {
+            parsedData = JSON.parse(rawData);
+          } catch (e) {
+            // Keep raw string payload if not JSON
+          }
+        }
+        try {
+          onMessage(eventType, parsedData);
+        } catch (err) {
+          console.error('[SSE] Handler error for event ' + eventType, err);
+        }
+      }
+    }
+
+    async function readSSEStream(response, onMessage) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          let match;
+          while ((match = buffer.match(/\r\n\r\n|\n\n|\r\r/)) !== null) {
+            const boundaryIdx = match.index;
+            const delimiterLen = match[0].length;
+            const rawBlock = buffer.slice(0, boundaryIdx);
+            buffer = buffer.slice(boundaryIdx + delimiterLen);
+            dispatchSSEBlock(rawBlock, onMessage);
+          }
+        }
+
+        // Flush trailing content if connection closes without trailing double newline
+        if (buffer.trim()) {
+          dispatchSSEBlock(buffer, onMessage);
+          buffer = '';
+        }
+      } finally {
+        try { reader.releaseLock(); } catch (e) {}
+      }
+    }
+
+    // ── FALLBACK / DIRECT JSON CHAT HANDLER ────────
+    async function sendChatJson(body, headers, signal, turnId) {
+      if ((signal && signal.aborted) || (turnId !== undefined && turnId !== currentTurnId)) {
+        return;
+      }
+      try {
+        const fetchOptions = {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body)
+        };
+        if (signal) fetchOptions.signal = signal;
+
+        const resp = await fetch(`${backendURL}/chat`, fetchOptions);
+
+        if ((signal && signal.aborted) || (turnId !== undefined && turnId !== currentTurnId)) {
+          return;
+        }
+
+        if (resp.status === 401) {
+          performLogout();
+          showToast('Session expired. Please log in again.', '#e05252');
+          return;
+        }
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.detail || `Server error ${resp.status}`);
+        }
+
+        const data = await resp.json();
+
+        if (data && data.session_id) {
+          persistAuthoritativeSessionId(data.session_id);
+        }
+
+        if ((signal && signal.aborted) || (turnId !== undefined && turnId !== currentTurnId)) {
+          return;
+        }
+
+        removeTypingIndicator();
+
+        const reply = data.reply || '';
+        conversationHistory.push({ role: 'assistant', content: reply });
+
+        let html = '';
+        const presMode = data.presentation_mode;
+        const resType = data.result_type;
+
+        if (resType === 'employment_verification' && presMode === 'GENERIC_EMPLOYMENT_VERIFICATION') {
+          const headerReply = reply.split('\n\n🏢')[0].split('\n\n**Company status**')[0];
+          html = renderMarkdown(headerReply || reply);
+        } else {
+          html = renderMarkdown(reply);
+        }
+
+        const actionNavHtml = renderActionNavControls(data.action_metadata);
+        if (actionNavHtml) {
+          html += actionNavHtml;
+        }
+        const selectionNavHtml = renderSelectionControls(data.selection_metadata);
+        if (selectionNavHtml) {
+          html += selectionNavHtml;
+        }
+
+        const results = data.results || data.jobs || data.candidates || data.people;
+        if (results && results.length > 0) {
+          const containerId = 'job_container_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+          const inferredType = data.result_type || (data.candidates || data.people ? 'candidates' : (data.jobs ? 'jobs' : 'candidates'));
+          html += renderCardsHtml(results, inferredType, data.pagination, containerId);
+        }
+
+        addBotMessage(html);
+
+      } catch (err) {
+        if (err.name === 'AbortError' || (signal && signal.aborted) || (turnId !== undefined && turnId !== currentTurnId)) {
+          return;
+        }
+        removeTypingIndicator();
+        addBotMessage(`<strong>⚠️ Connection Error:</strong> ${escapeHtml(err.message)}<br><br>
+        Make sure the backend is running at <code>${escapeHtml(backendURL)}</code>.<br>
+        Click ⚙️ in the top bar to update the backend URL.`);
+      }
+    }
+
     // ── SEND MESSAGE ───────────────────────────────
     async function sendMessage(pendingAction, displayText) {
-      if (isWaiting) return;
       const input = document.getElementById('msgInput');
-      const text = input.value.trim();
-      if (!text) return;
+      const text = input ? input.value.trim() : '';
+      if (!text && !pendingAction) return;
 
       const userDisplayText = (typeof displayText === 'string' && displayText.trim()) ? displayText.trim() : text;
 
@@ -2816,19 +3121,28 @@
 
       hideHero();
       addUserMessage(userDisplayText);
-      conversationHistory.push({ role: 'user', content: text });
+      const userHistoryEntry = { role: 'user', content: text };
+      conversationHistory.push(userHistoryEntry);
       input.value = '';
       input.style.height = 'auto';
 
       isWaiting = true;
-      document.getElementById('sendBtn').disabled = true;
+      updateSendButtonState(true);
       addTypingIndicator();
 
       let currentSessionId = sessionStorage.getItem('cc_session_id');
-      if (!currentSessionId) {
-        currentSessionId = 'sess_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
-        sessionStorage.setItem('cc_session_id', currentSessionId);
+      if (currentSessionId && !persistAuthoritativeSessionId(currentSessionId)) {
+        currentSessionId = null;
+        sessionStorage.removeItem('cc_session_id');
       }
+
+      // Abort any prior in-flight streaming request to avoid race conditions
+      if (activeAbortController) {
+        try { activeAbortController.abort(); } catch (e) {}
+        activeAbortController = null;
+      }
+      activeAbortController = new AbortController();
+      const thisTurnId = ++currentTurnId;
 
       try {
         const nearbyLat = nearbyIntent ? Number((userCoords && userCoords.latitude) ?? (userLocationObj && userLocationObj.latitude)) : undefined;
@@ -2836,8 +3150,8 @@
         const hasNearbyCoords = nearbyIntent && Number.isFinite(nearbyLat) && Number.isFinite(nearbyLon);
 
         const body = {
-          session_id: currentSessionId,
-          messages: conversationHistory,
+          session_id: currentSessionId || undefined,
+          message: text,
           user_location: userLocationObj || userLocation || undefined,
           user_detail: currentUserDetail || undefined,
           widgets_data: currentWidgetsData || undefined,
@@ -2857,117 +3171,404 @@
         console.log("[NearbyDebug] nearbyLon:", nearbyLon);
         console.log("[NearbyDebug] /chat payload lat/lng:", body.latitude, body.longitude);
 
-
         const headers = {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${authToken}`
         };
         if (apiKey) headers['X-API-Key'] = apiKey;
 
-        const resp = await fetch(`${backendURL}/chat`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body)
-        });
+        let assistantContainer = null;
+        let accumulatedReply = '';
+        let activeRequestId = null;
+        let resultType = null;
+        let presentationMode = null;
+        let hasMeaningfulOutput = false;
+        let receivedDone = false;
+        let interruptionNoticeShown = false;
+
+        function cleanupAbandonedContainer() {
+          if (assistantContainer && assistantContainer.msgDiv) {
+            assistantContainer.msgDiv.remove();
+            assistantContainer = null;
+          }
+        }
+
+        function removePendingUserHistory() {
+          if (thisTurnId !== currentTurnId) return;
+          const idx = conversationHistory.lastIndexOf(userHistoryEntry);
+          if (idx !== -1) {
+            conversationHistory.splice(idx, 1);
+          }
+        }
+
+        function ensureContainer(reqId) {
+          if (!assistantContainer) {
+            removeTypingIndicator();
+            assistantContainer = createStreamingBotMessage(reqId || activeRequestId);
+          }
+          return assistantContainer;
+        }
+
+        let resp;
+        try {
+          resp = await fetch(`${backendURL}/chat/stream`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: activeAbortController.signal
+          });
+        } catch (fetchErr) {
+          cleanupAbandonedContainer();
+          if (fetchErr.name === 'AbortError' || (activeAbortController && activeAbortController.signal.aborted) || thisTurnId !== currentTurnId) {
+            removePendingUserHistory();
+            return;
+          }
+          console.warn('[SSE] /chat/stream fetch failed, falling back to /chat:', fetchErr);
+          await sendChatJson(body, headers, activeAbortController.signal, thisTurnId);
+          return;
+        }
+
+        if ((activeAbortController && activeAbortController.signal.aborted) || thisTurnId !== currentTurnId) {
+          cleanupAbandonedContainer();
+          removePendingUserHistory();
+          return;
+        }
 
         if (resp.status === 401) {
+          cleanupAbandonedContainer();
           performLogout();
           showToast('Session expired. Please log in again.', '#e05252');
           return;
         }
 
+        // If backend returned non-2xx for /chat/stream, fall back to /chat JSON
         if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}));
-          throw new Error(err.detail || `Server error ${resp.status}`);
+          cleanupAbandonedContainer();
+          if ((activeAbortController && activeAbortController.signal.aborted) || thisTurnId !== currentTurnId) {
+            removePendingUserHistory();
+            return;
+          }
+          console.warn('[SSE] /chat/stream returned HTTP ' + resp.status + ', falling back to /chat');
+          await sendChatJson(body, headers, activeAbortController.signal, thisTurnId);
+          return;
         }
 
-        const data = await resp.json();
-        removeTypingIndicator();
+        try {
+          await readSSEStream(resp, (eventType, data) => {
+            if (thisTurnId !== currentTurnId) return;
 
-        const reply = data.reply;
-        conversationHistory.push({ role: 'assistant', content: reply });
-        
-        let html = '';
-        // Phase 2.5H: Check presentation_mode for employment verification
-        const presMode = data.presentation_mode;
-        const resType = data.result_type;
+            switch (eventType) {
+              case 'start': {
+                activeRequestId = data && data.request_id;
+                if (data && data.session_id) {
+                  persistAuthoritativeSessionId(data.session_id);
+                }
+                ensureContainer(activeRequestId);
+                break;
+              }
 
-        if (resType === 'employment_verification' && presMode === 'GENERIC_EMPLOYMENT_VERIFICATION') {
-          // Generic query: concise contextual header from reply + visual card as primary detailed roadmap
-          const headerReply = reply.split('\n\n🏢')[0].split('\n\n**Company status**')[0];
-          html = renderMarkdown(headerReply || reply);
-        } else {
-          // Standard Markdown reply (including FOCUSED_EMPLOYMENT_VERIFICATION which displays focused guidance text)
-          html = renderMarkdown(reply);
-        }
+              case 'status': {
+                if (!accumulatedReply) {
+                  const c = ensureContainer(activeRequestId);
+                  if (c.statusEl) {
+                    c.statusEl.textContent = (data && data.message) || 'Generating response...';
+                    c.statusEl.style.display = 'block';
+                  }
+                }
+                break;
+              }
 
-        const actionNavHtml = renderActionNavControls(data.action_metadata);
-        if (actionNavHtml) {
-          html += actionNavHtml;
-        }
-        const selectionNavHtml = renderSelectionControls(data.selection_metadata);
-        if (selectionNavHtml) {
-          html += selectionNavHtml;
-        }
+              case 'results': {
+                hasMeaningfulOutput = true;
+                const c = ensureContainer(activeRequestId);
+                if (c.statusEl) c.statusEl.style.display = 'none';
 
-        const results = data.results || data.jobs || data.candidates || data.people;
-        if (results && results.length > 0) {
-          const containerId = 'job_container_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
-          const inferredType = data.result_type || (data.candidates || data.people ? 'candidates' : (data.jobs ? 'jobs' : 'candidates'));
-          html += renderCardsHtml(results, inferredType, data.pagination, containerId);
-        }
+                resultType = data.result_type;
+                presentationMode = data.presentation_mode;
 
-        /*
-        const suggestionChips = data.suggestion_chips;
-        if (Array.isArray(suggestionChips) && suggestionChips.length > 0) {
-          html += '<div class="suggestion-chips-container">';
-          suggestionChips.forEach(chipText => {
-            if (chipText && String(chipText).trim()) {
-              const cleanText = String(chipText).trim();
-              const safeAttr = escapeHtml(cleanText).replace(/'/g, "&#39;");
-              html += `<button type="button" class="suggestion-chip" onclick="askChip('${safeAttr}')">${escapeHtml(cleanText)}</button>`;
+                const results = data.results || data.jobs || data.candidates || data.people;
+                if (results && results.length > 0) {
+                  const containerId = 'job_container_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+                  const inferredType = data.result_type || (data.candidates || data.people ? 'candidates' : (data.jobs ? 'jobs' : 'candidates'));
+                  c.cardsEl.innerHTML = renderCardsHtml(results, inferredType, data.pagination, containerId);
+                }
+
+                if (data.action_metadata) {
+                  const actionNavHtml = renderActionNavControls(data.action_metadata);
+                  if (actionNavHtml) c.actionsEl.innerHTML = actionNavHtml;
+                }
+
+                if (data.selection_metadata) {
+                  const selectionNavHtml = renderSelectionControls(data.selection_metadata);
+                  if (selectionNavHtml) c.selectionEl.innerHTML = selectionNavHtml;
+                }
+
+                const suggestionChips = data.suggestion_chips;
+                if (Array.isArray(suggestionChips) && suggestionChips.length > 0) {
+                  const container = document.createElement('div');
+                  container.className = 'suggestion-chips-container';
+                  container.style.marginTop = '8px';
+                  suggestionChips.forEach(chipText => {
+                    if (chipText && String(chipText).trim()) {
+                      const cleanText = String(chipText).trim();
+                      const btn = document.createElement('button');
+                      btn.type = 'button';
+                      btn.className = 'suggestion-chip';
+                      btn.setAttribute('data-chip-text', cleanText);
+                      btn.textContent = cleanText;
+                      btn.addEventListener('click', () => askChip(cleanText));
+                      container.appendChild(btn);
+                    }
+                  });
+                  c.cardsEl.appendChild(container);
+                }
+
+                scrollToBottom();
+                break;
+              }
+
+              case 'delta': {
+                hasMeaningfulOutput = true;
+                const c = ensureContainer(activeRequestId);
+                if (c.statusEl) c.statusEl.style.display = 'none';
+
+                accumulatedReply += ((data && data.text) || '');
+
+                let textToRender = accumulatedReply;
+                if (resultType === 'employment_verification' && presentationMode === 'GENERIC_EMPLOYMENT_VERIFICATION') {
+                  textToRender = accumulatedReply.split('\n\n🏢')[0].split('\n\n**Company status**')[0];
+                }
+                c.textEl.innerHTML = renderMarkdown(textToRender);
+                scrollToBottom();
+                break;
+              }
+
+              case 'done': {
+                receivedDone = true;
+                if (data && data.session_id) {
+                  persistAuthoritativeSessionId(data.session_id);
+                }
+                const c = ensureContainer(activeRequestId);
+                if (c.statusEl) c.statusEl.style.display = 'none';
+
+                if (data && typeof data.reply === 'string' && data.reply.trim()) {
+                  accumulatedReply = data.reply;
+                  let textToRender = accumulatedReply;
+                  if (resultType === 'employment_verification' && presentationMode === 'GENERIC_EMPLOYMENT_VERIFICATION') {
+                    textToRender = accumulatedReply.split('\n\n🏢')[0].split('\n\n**Company status**')[0];
+                  }
+                  c.textEl.innerHTML = renderMarkdown(textToRender);
+                }
+
+                if (thisTurnId === currentTurnId) {
+                  conversationHistory.push({ role: 'assistant', content: accumulatedReply });
+                }
+                scrollToBottom();
+                break;
+              }
+
+              case 'error': {
+                const c = ensureContainer(activeRequestId);
+                if (c.statusEl) c.statusEl.style.display = 'none';
+                const errDetail = (data && data.detail) || 'An error occurred during streaming.';
+                c.textEl.innerHTML += `<div style="color: #e05252; font-size: 13px; margin-top: 6px;">⚠️ ${escapeHtml(errDetail)}</div>`;
+                break;
+              }
+
+              default:
+                console.log('[SSE] Ignored event type:', eventType);
+                break;
             }
           });
-          html += '</div>';
-        }
-        */
 
-        addBotMessage(html);
+          // Check if stream ended without a done event
+          if (!receivedDone) {
+            if ((activeAbortController && activeAbortController.signal.aborted) || thisTurnId !== currentTurnId) {
+              if (thisTurnId !== currentTurnId) {
+                cleanupAbandonedContainer();
+                return;
+              }
+              if (!hasMeaningfulOutput) {
+                cleanupAbandonedContainer();
+                removePendingUserHistory();
+              } else {
+                if (!interruptionNoticeShown) {
+                  interruptionNoticeShown = true;
+                  const c = ensureContainer(activeRequestId);
+                  if (c && c.textEl) {
+                    const noticeEl = document.createElement('div');
+                    noticeEl.className = 'stream-stopped-notice';
+                    noticeEl.style.cssText = 'color: #a1a1aa; font-size: 12px; margin-top: 6px; font-weight: 500;';
+                    noticeEl.textContent = '⏹️ Generation stopped';
+                    c.textEl.appendChild(noticeEl);
+                  }
+                }
+                if (thisTurnId === currentTurnId && accumulatedReply && accumulatedReply.trim()) {
+                  conversationHistory.push({ role: 'assistant', content: accumulatedReply.trim() });
+                }
+              }
+              return;
+            }
+            if (!hasMeaningfulOutput) {
+              console.warn('[SSE] Stream ended without done before output, falling back to /chat');
+              cleanupAbandonedContainer();
+              await sendChatJson(body, headers, activeAbortController ? activeAbortController.signal : null, thisTurnId);
+              return;
+            } else {
+              console.warn('[SSE] Stream ended without done after partial output');
+              if (!interruptionNoticeShown) {
+                interruptionNoticeShown = true;
+                const c = ensureContainer(activeRequestId);
+                if (c && c.textEl) {
+                  const noticeEl = document.createElement('div');
+                  noticeEl.className = 'stream-interrupted-notice';
+                  noticeEl.style.cssText = 'color: #e05252; font-size: 12px; margin-top: 6px;';
+                  noticeEl.textContent = '⚠️ (Response interrupted)';
+                  c.textEl.appendChild(noticeEl);
+                }
+              }
+            }
+          }
+        } catch (streamErr) {
+          if (streamErr.name === 'AbortError' || (activeAbortController && activeAbortController.signal.aborted) || thisTurnId !== currentTurnId) {
+            if (thisTurnId !== currentTurnId) {
+              cleanupAbandonedContainer();
+              return;
+            }
+            if (!hasMeaningfulOutput) {
+              cleanupAbandonedContainer();
+              removePendingUserHistory();
+            } else {
+              if (!interruptionNoticeShown) {
+                interruptionNoticeShown = true;
+                const c = ensureContainer(activeRequestId);
+                if (c && c.textEl) {
+                  const noticeEl = document.createElement('div');
+                  noticeEl.className = 'stream-stopped-notice';
+                  noticeEl.style.cssText = 'color: #a1a1aa; font-size: 12px; margin-top: 6px; font-weight: 500;';
+                  noticeEl.textContent = '⏹️ Generation stopped';
+                  c.textEl.appendChild(noticeEl);
+                }
+              }
+              if (thisTurnId === currentTurnId && !receivedDone && accumulatedReply && accumulatedReply.trim()) {
+                conversationHistory.push({ role: 'assistant', content: accumulatedReply.trim() });
+              }
+            }
+            return;
+          }
+          if (!hasMeaningfulOutput) {
+            console.warn('[SSE] Stream broke before output, falling back to /chat:', streamErr);
+            cleanupAbandonedContainer();
+            await sendChatJson(body, headers, activeAbortController ? activeAbortController.signal : null, thisTurnId);
+            return;
+          } else {
+            console.error('[SSE] Stream interrupted after partial output:', streamErr);
+            if (!interruptionNoticeShown) {
+              interruptionNoticeShown = true;
+              const c = ensureContainer(activeRequestId);
+              if (c && c.textEl) {
+                const noticeEl = document.createElement('div');
+                noticeEl.className = 'stream-interrupted-notice';
+                noticeEl.style.cssText = 'color: #e05252; font-size: 12px; margin-top: 6px;';
+                noticeEl.textContent = '⚠️ (Response interrupted)';
+                c.textEl.appendChild(noticeEl);
+              }
+            }
+          }
+        }
 
       } catch (err) {
+        cleanupAbandonedContainer();
+        if (err.name === 'AbortError' || (activeAbortController && activeAbortController.signal.aborted) || thisTurnId !== currentTurnId) {
+          if (thisTurnId === currentTurnId && typeof removePendingUserHistory === 'function') {
+            removePendingUserHistory();
+          }
+          return;
+        }
         removeTypingIndicator();
-        addBotMessage(`<strong>⚠️ Connection Error:</strong> ${err.message}<br><br>
-        Make sure the backend is running at <code>${backendURL}</code>.<br>
+        addBotMessage(`<strong>⚠️ Connection Error:</strong> ${escapeHtml(err.message)}<br><br>
+        Make sure the backend is running at <code>${escapeHtml(backendURL)}</code>.<br>
         Click ⚙️ in the top bar to update the backend URL.`);
+      } finally {
+        if (thisTurnId === currentTurnId) {
+          removeTypingIndicator();
+          isWaiting = false;
+          updateSendButtonState(false);
+          const sendBtn = document.getElementById('sendBtn');
+          if (sendBtn) sendBtn.disabled = false;
+          activeAbortController = null;
+          const inputEl = document.getElementById('msgInput');
+          if (inputEl) inputEl.focus();
+        }
       }
-
-      isWaiting = false;
-      document.getElementById('sendBtn').disabled = false;
-      document.getElementById('msgInput').focus();
     }
 
     function askChip(text) {
-      document.getElementById('msgInput').value = text;
+      if (text == null) return;
+      const val = String(text).trim();
+      if (!val) return;
+      const input = document.getElementById('msgInput');
+      if (input) input.value = val;
       sendMessage();
+    }
+
+    function handleActionNavChip(btn) {
+      if (!btn) return;
+      const msg = btn.getAttribute('data-action-message');
+      if (msg) askChip(msg);
+    }
+
+    function handleSelectionRecordChip(btn) {
+      if (!btn) return;
+      const key = btn.getAttribute('data-selection-key');
+      const label = btn.getAttribute('data-display-label');
+      if (key) {
+        askEmploymentRecordChip(key, label || key);
+      }
+    }
+
+    function handleSelectionCompanyChip(btn) {
+      if (!btn) return;
+      const company = btn.getAttribute('data-company-name');
+      const id = btn.getAttribute('data-company-id');
+      if (company) {
+        askEmploymentCompanyChip(company, id);
+      }
     }
 
     function askEmploymentRecordChip(selectionKey, displayLabel) {
       if (!selectionKey || !String(selectionKey).trim()) return;
       const key = String(selectionKey).trim();
-      document.getElementById('msgInput').value = key;
+      const input = document.getElementById('msgInput');
+      if (input) input.value = key;
       sendMessage(undefined, displayLabel || key);
     }
 
     function askEmploymentCompanyChip(companyName, companyId) {
-      document.getElementById('msgInput').value = companyName;
+      if (!companyName || !String(companyName).trim()) return;
+      const company = String(companyName).trim();
+      const input = document.getElementById('msgInput');
+      if (input) input.value = company;
       sendMessage({
         type: 'employment_company_select',
-        company_name: companyName,
-        company_id: companyId || undefined
+        company_name: company,
+        company_id: companyId ? String(companyId).trim() : undefined
       });
     }
 
     function clearChat() {
+      const activeSessionToClear = sessionStorage.getItem('cc_session_id');
+      sessionStorage.removeItem('cc_session_id');
+      if (activeAbortController) {
+        try { activeAbortController.abort(); } catch (e) {}
+        activeAbortController = null;
+      }
+      currentTurnId++;
+      removeTypingIndicator();
+      isWaiting = false;
+      updateSendButtonState(false);
+      const sendBtn = document.getElementById('sendBtn');
+      if (sendBtn) sendBtn.disabled = false;
       conversationHistory = [];
       const msgs = document.getElementById('messages');
       // Remove all except hero
@@ -2976,6 +3577,15 @@
       });
       const hero = document.getElementById('heroSection');
       if (hero) hero.style.display = '';
+
+      if (activeSessionToClear && authToken) {
+        fetch(`${backendURL}/chat/history?session_id=${encodeURIComponent(activeSessionToClear)}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${authToken}`
+          }
+        }).catch(err => console.warn('[ClearChat] Backend history clear failed:', err));
+      }
     }
 
 
@@ -3153,9 +3763,9 @@
       if (compIsVerified === true) {
         compVerifHtml = `<div class="emp-comp-verif-status verified">✓ Company domain verified</div>`;
       } else if (compIsVerified === false) {
-        compVerifHtml = `<div class="emp-comp-verif-status unverified">⚠ Company domain not verified</div>`;
+        compVerifHtml = `<div class="emp-comp-verif-status unverified">⚠ Company not verified</div>`;
       } else {
-        compVerifHtml = `<div class="emp-comp-verif-status unverified" style="color: #a1a1aa;">○ Company domain status unknown</div>`;
+        compVerifHtml = `<div class="emp-comp-verif-status unverified" style="color: #a1a1aa;">○ Company status unknown</div>`;
       }
 
       // Evidence Availability
@@ -3177,13 +3787,15 @@
 
       // CTA: url exists -> show View Employment; url absent -> omit CTA
       const url = (item.url && item.url !== '#') ? item.url : null;
-      const ctaHtml = url ? `<a href="${url}" target="_blank" rel="noopener noreferrer" class="card-action-btn">View Employment →</a>` : '';
+      const sanitizedUrl = url ? sanitizeCardUrl(url, '') : '';
+      const ctaHtml = sanitizedUrl ? `<a href="${sanitizedUrl}" target="_blank" rel="noopener noreferrer" class="card-action-btn">View Employment →</a>` : '';
+      const safeLogo = companyLogo ? sanitizeCardUrl(companyLogo, '') : '';
 
       return `
         <div class="job-card employment-card">
           <div class="emp-header">
             <div class="emp-company-group">
-              ${companyLogo ? `<img src="${escapeHtml(companyLogo)}" class="emp-logo" alt="${companyName}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" /><div class="emp-logo-fallback" style="display:none;">${escapeHtml(initials)}</div>` : `<div class="emp-logo-fallback">${escapeHtml(initials)}</div>`}
+              ${safeLogo ? `<img src="${safeLogo}" class="emp-logo" alt="${companyName}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" /><div class="emp-logo-fallback" style="display:none;">${escapeHtml(initials)}</div>` : `<div class="emp-logo-fallback">${escapeHtml(initials)}</div>`}
               <div>
                 <h4 class="emp-company-name">${companyName}</h4>
                 <div class="emp-status-meta">
@@ -3277,7 +3889,7 @@
         }
 
         const isHighest = Boolean(item.is_highest || item.ishighest);
-        const url = item.url || 'https://www.collarcheck.com/dashboard/user/education';
+        const url = sanitizeCardUrl(item.url || 'https://www.collarcheck.com/dashboard/user/education');
         const matchReason = item.match_reason || 'Verified Academic Qualification';
 
         return `
@@ -3299,7 +3911,7 @@
             </div>
             <div class="card-footer">
               <span class="match-reason">${escapeHtml(matchReason)}</span>
-              <a href="${url}" target="_blank" class="card-action-btn edu-action-btn">Manage Education →</a>
+              <a href="${url}" target="_blank" rel="noopener noreferrer" class="card-action-btn edu-action-btn">Manage Education →</a>
             </div>
           </div>
         `;
@@ -3310,7 +3922,7 @@
         const size = item.company_size || '';
         const distLabel = item.distance_label || (item.distance != null ? `📍 ${item.distance} km away` : '');
         const matchReason = item.match_reason || distLabel || '📍 Nearby Organization';
-        const url = item.url || '#';
+        const url = sanitizeCardUrl(item.url || '#');
 
         return `
           <div class="job-card org-card">
@@ -3327,7 +3939,7 @@
             </div>
             <div class="card-footer">
               <span class="match-reason">${escapeHtml(matchReason)}</span>
-              <a href="${url}" target="_blank" class="card-action-btn">View Organization →</a>
+              <a href="${url}" target="_blank" rel="noopener noreferrer" class="card-action-btn">View Organization →</a>
             </div>
           </div>
         `;
@@ -3339,7 +3951,7 @@
         const mode = item.job_mode || '';
         const exp = item.experience || '';
         const salary = item.salary || '';
-        const url = item.url || '#';
+        const url = sanitizeCardUrl(item.url || '#');
         const matchReason = item.match_reason || '';
         const rawFull = item.description || item.job_description || item.preview || '';
         const cleanFullDesc = cleanDescriptionText(rawFull).replace(/[\.…]+$/, '');
@@ -3373,8 +3985,8 @@
             <div class="card-footer" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
               ${matchReason ? `<span class="match-reason">✨ ${escapeHtml(matchReason)}</span>` : '<span></span>'}
               <div style="display: flex; gap: 8px; align-items: center;">
-                <button type="button" class="card-action-btn-secondary" onclick="askChip('Why was job #${item.global_rank || 1} recommended?')" style="background: transparent; color: #00C2A8; border: 1px solid #00C2A8; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">Why this job?</button>
-                <a href="${url}" target="_blank" class="card-action-btn">Apply Now →</a>
+                <button type="button" class="card-action-btn-secondary" onclick="askChip('Why was job #${Number(item.global_rank) || 1} recommended?')" style="background: transparent; color: #00C2A8; border: 1px solid #00C2A8; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">Why this job?</button>
+                <a href="${url}" target="_blank" rel="noopener noreferrer" class="card-action-btn">Apply Now →</a>
               </div>
             </div>
           </div>
@@ -3401,7 +4013,7 @@
         const exp = item.experience_label || (item.experience ? `${item.experience} yrs` : '');
         const skillsList = Array.isArray(item.skills) ? item.skills.filter(Boolean) : (typeof item.skills === 'string' ? item.skills.split(',').map(s => s.trim()).filter(Boolean) : []);
         const skills = skillsList.length > 0 ? skillsList.slice(0, 5).join(', ') : '';
-        const url = item.url || '#';
+        const url = sanitizeCardUrl(item.url || '#');
         const matchReason = item.match_reason || '';
 
         const rawId = item.cc_id || item.candidate_id || item.id || '';
@@ -3469,7 +4081,7 @@
             </div>
             <div class="card-footer">
               ${matchReason ? `<span class="match-reason">✨ ${escapeHtml(matchReason)}</span>` : '<span></span>'}
-              <a href="${url}" target="_blank" class="card-action-btn">View Profile →</a>
+              <a href="${url}" target="_blank" rel="noopener noreferrer" class="card-action-btn">View Profile →</a>
             </div>
           </div>
         `;
@@ -3596,15 +4208,6 @@
         previewEl.classList.add('collapsed');
         btn.innerText = 'Read More';
       }
-    }
-
-    function escapeHtml(str) {
-      if (!str) return '';
-      return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
     }
   </script>
 </body>

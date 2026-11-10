@@ -1,7 +1,34 @@
 import os
+import math
+import logging
+from typing import Any
 from dotenv import load_dotenv
 
 load_dotenv()
+log = logging.getLogger(__name__)
+
+def validate_sample_rate(val: Any, default: float = 1.0) -> float:
+    """
+    Safely parses and validates LANGFUSE_SAMPLE_RATE.
+    Preserves valid finite values in [0.0, 1.0] exactly.
+    Malformed, empty, non-numeric, NaN, infinite, or out-of-range values fall back
+    to the safe default (1.0) with a concise warning that does not expose secrets.
+    Never silently clamps invalid or out-of-range values.
+    """
+    if val is None:
+        return default
+    try:
+        parsed = float(val)
+        if not math.isfinite(parsed):
+            log.warning("LANGFUSE_SAMPLE_RATE must be finite; got non-finite value. Falling back to default %s.", default)
+            return default
+        if 0.0 <= parsed <= 1.0:
+            return parsed
+        log.warning("LANGFUSE_SAMPLE_RATE out of range [0.0, 1.0]; got %s. Falling back to default %s.", parsed, default)
+        return default
+    except (ValueError, TypeError):
+        log.warning("LANGFUSE_SAMPLE_RATE invalid numeric format; got %r. Falling back to default %s.", str(val)[:20], default)
+        return default
 
 JWT_SECRET = os.getenv("JWT_SECRET", "collarcheck_prototype_secret_key_123")
 JWT_ALGORITHM = "HS256"
@@ -9,8 +36,25 @@ JWT_ALGORITHM = "HS256"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 MODEL = "gpt-4o-mini"
+try:
+    from backend.utils.sse import validate_keepalive_interval
+except ModuleNotFoundError:
+    from utils.sse import validate_keepalive_interval  # type: ignore
+
+SSE_KEEPALIVE_INTERVAL_SECONDS = validate_keepalive_interval(
+    os.getenv("SSE_KEEPALIVE_INTERVAL_SECONDS", "15.0")
+)
 
 LANGFUSE_ENABLED = os.getenv("LANGFUSE_ENABLED", "false").lower() in ("true", "1", "yes")
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+LANGFUSE_RELEASE = os.getenv("LANGFUSE_RELEASE", "1.0.0")
+LANGFUSE_SAMPLE_RATE = validate_sample_rate(os.getenv("LANGFUSE_SAMPLE_RATE", "1.0"))
+LANGFUSE_SESSION_HMAC_SECRET = os.getenv("LANGFUSE_SESSION_HMAC_SECRET", "")
+
+# Company Claim Status Strict Mode (Opt-in; defaults to false for legacy compatibility)
+STRICT_CLAIM_STATUS_ENABLED = os.getenv("STRICT_CLAIM_STATUS_ENABLED", "false").lower() in ("true", "1", "yes")
 
 # Redis Configuration (RAM-only session and conversation history store)
 REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -53,6 +97,43 @@ DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_USER = os.getenv("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "collarcheck")
+
+def validate_positive_timeout(val: Any, default: float, param_name: str = "DB_TIMEOUT") -> float:
+    """
+    Safely parses and validates database socket timeouts.
+    Preserves valid finite values > 0.0.
+    Non-numeric, non-finite, or <= 0 values fall back to safe default with a warning.
+    """
+    if val is None:
+        return default
+    try:
+        parsed = float(val)
+        if not math.isfinite(parsed) or parsed <= 0:
+            log.warning("%s must be positive finite float; got %r. Falling back to default %s.", param_name, val, default)
+            return default
+        return parsed
+    except (ValueError, TypeError):
+        log.warning("%s invalid numeric format; got %r. Falling back to default %s.", param_name, str(val)[:20], default)
+        return default
+
+DB_CONNECT_TIMEOUT_SECONDS = validate_positive_timeout(
+    os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "5.0"), default=5.0, param_name="DB_CONNECT_TIMEOUT_SECONDS"
+)
+DB_READ_TIMEOUT_SECONDS = validate_positive_timeout(
+    os.getenv("DB_READ_TIMEOUT_SECONDS", "10.0"), default=10.0, param_name="DB_READ_TIMEOUT_SECONDS"
+)
+DB_WRITE_TIMEOUT_SECONDS = validate_positive_timeout(
+    os.getenv("DB_WRITE_TIMEOUT_SECONDS", "10.0"), default=10.0, param_name="DB_WRITE_TIMEOUT_SECONDS"
+)
+
+# Bounded connection-establishment retry configuration
+DB_CONNECT_MAX_RETRIES = max(1, min(10, int(os.getenv("DB_CONNECT_MAX_RETRIES", "3"))))
+DB_RETRY_BASE_DELAY_SECONDS = validate_positive_timeout(
+    os.getenv("DB_RETRY_BASE_DELAY_SECONDS", "0.1"), default=0.1, param_name="DB_RETRY_BASE_DELAY_SECONDS"
+)
+DB_RETRY_MAX_DELAY_SECONDS = validate_positive_timeout(
+    os.getenv("DB_RETRY_MAX_DELAY_SECONDS", "1.0"), default=1.0, param_name="DB_RETRY_MAX_DELAY_SECONDS"
+)
 
 JOB_MODE_MAP = {1: "Work from Office", 2: "Work from Home", 3: "Hybrid"}
 

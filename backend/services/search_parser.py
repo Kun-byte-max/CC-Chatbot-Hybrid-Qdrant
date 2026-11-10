@@ -3,7 +3,7 @@ import json
 import logging
 import re
 import httpx
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 
 try:
     from backend.services.llm_service import LLMService
@@ -87,7 +87,7 @@ def resolve_job_role_type_id(emp_type_input: Any) -> Optional[int]:
     return None
 
 
-async def parse_search_query(message: str, role: str, messages: list = None, user_location: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
+async def parse_search_query(message: str, role: str, messages: list = None, user_location: Optional[str] = None, session_id: Optional[str] = None, user_id: Optional[Union[str, int]] = None) -> Dict[str, Any]:
     """
     Parses unstructured user message into structured search criteria using the LLM.
     """
@@ -184,7 +184,7 @@ async def parse_search_query(message: str, role: str, messages: list = None, use
     JSON:
     """
     try:
-        completion = await LLMService.get_chat_completion(prompt, [], timeout=12.0)
+        completion = await LLMService.get_chat_completion(prompt, [], timeout=12.0, name="search_parser")
         cleaned_completion = completion.strip()
         if "```json" in cleaned_completion:
             cleaned_completion = cleaned_completion.split("```json")[1].split("```")[0].strip()
@@ -286,7 +286,7 @@ async def parse_search_query(message: str, role: str, messages: list = None, use
         if parsed.get("use_profile_skills") and parsed.get("keyword") in ("jobs", "profile", "skills", "internship", "internships", "intern", "part time", "full time"):
             parsed["keyword"] = None
 
-        parsed["search_target"] = normalize_search_target(parsed.get("search_target"), clean_message, role=role, session_id=session_id)
+        parsed["search_target"] = normalize_search_target(parsed.get("search_target"), clean_message, role=role, session_id=session_id, user_id=user_id)
         has_job_indicator = any(re.search(p, msg_l) for p in [r"\bjobs?\b", r"\broles?\b", r"\bvacanc(?:y|ies)\b", r"\bopenings?\b", r"\bpositions?\b"])
         if is_self_profile_advice_query(clean_message) and not has_job_indicator:
             parsed["search_target"] = "UNKNOWN"
@@ -344,7 +344,7 @@ async def parse_search_query(message: str, role: str, messages: list = None, use
         }
 
 
-def normalize_search_target(raw_target: Optional[str], message: str, role: str = "employee", session_id: Optional[str] = None) -> str:
+def normalize_search_target(raw_target: Optional[str], message: str, role: str = "employee", session_id: Optional[str] = None, user_id: Optional[Union[str, int]] = None) -> str:
     """
     Normalizes search target using a Hybrid LLM + Precedence approach:
     1. Check for conversational pagination commands and resolve target from stored session state.
@@ -363,7 +363,7 @@ def normalize_search_target(raw_target: Optional[str], message: str, role: str =
     if is_pag_cmd and session_id:
         try:
             from backend.utils.session_state import get_pagination_state
-            p_state = get_pagination_state(session_id, role=clean_role)
+            p_state = get_pagination_state(session_id, role=clean_role, user_id=user_id)
             if p_state and p_state.get("result_type") == "people":
                 return "PEOPLE_SEARCH"
             elif p_state and p_state.get("result_type") == "jobs":
@@ -438,7 +438,7 @@ def normalize_search_target(raw_target: Optional[str], message: str, role: str =
         if session_id:
             try:
                 from backend.utils.session_state import get_candidate_search_criteria
-                if get_candidate_search_criteria(session_id, role=clean_role):
+                if get_candidate_search_criteria(session_id, role=clean_role, user_id=user_id):
                     return "PEOPLE_SEARCH"
             except Exception:
                 pass

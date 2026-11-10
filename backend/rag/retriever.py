@@ -101,12 +101,13 @@ class KnowledgeRetriever:
         Retrieves authoritative job document based on session reference or query criteria.
         Role-isolated: employee uses (user_id, session_id), employer uses (employer_id, session_id).
         """
-        # Ensure role-isolated composite session key
-        rec_ctx = get_recommendation_session(session_id, role=role) or get_recommendation_session(user_id, role=role)
-        if not rec_ctx:
-            # Fall back to checking session_state directly if composite key formatted
-            comp_key = f"{role}:{user_id}:{session_id}" if user_id and session_id else (session_id or user_id or "default")
-            rec_ctx = get_recommendation_session(comp_key) or {}
+        # Ensure role-isolated and user-isolated composite session key
+        rec_ctx = get_recommendation_session(session_id, role=role, user_id=user_id)
+        if not rec_ctx and not user_id:
+            # Fall back to anonymous session lookup
+            rec_ctx = get_recommendation_session(session_id, role=role) or {}
+        elif not rec_ctx:
+            rec_ctx = {}
 
         target_job_dict: Optional[Dict[str, Any]] = None
         ordinal_pos = cls._parse_ordinal_or_rank(query)

@@ -53,6 +53,108 @@ class JobMatchContractException(JobMatchException):
     pass
 
 
+# Application-managed JobMatch HTTP client state (loop-aware)
+_app_job_match_client: Optional[httpx.AsyncClient] = None
+_app_job_match_loop: Optional[Any] = None
+_test_injected_job_match_client: bool = False
+
+
+def init_job_match_client(
+    timeout: Optional[float] = None,
+    max_connections: int = 30,
+    max_keepalive_connections: int = 15,
+    keepalive_expiry: float = 30.0,
+) -> httpx.AsyncClient:
+    """
+    Initializes a shared, connection-pooled httpx.AsyncClient bound to the current running event loop.
+    Intended to be called during application lifespan startup.
+    """
+    import asyncio
+    global _app_job_match_client, _app_job_match_loop, _test_injected_job_match_client
+    loop = asyncio.get_running_loop()
+    effective_timeout = timeout if timeout is not None else JOB_MATCH_TIMEOUT_SECONDS
+    limits = httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive_connections,
+        keepalive_expiry=keepalive_expiry,
+    )
+    _app_job_match_client = httpx.AsyncClient(
+        timeout=effective_timeout,
+        limits=limits,
+    )
+    _app_job_match_loop = loop
+    _test_injected_job_match_client = False
+    return _app_job_match_client
+
+
+async def close_job_match_client() -> None:
+    """
+    Closes the application-managed JobMatch client and drains connections.
+    Intended to be called during application lifespan shutdown.
+    Idempotent and safe to call repeatedly.
+    """
+    global _app_job_match_client, _app_job_match_loop, _test_injected_job_match_client
+    client = _app_job_match_client
+    is_injected = _test_injected_job_match_client
+    _app_job_match_client = None
+    _app_job_match_loop = None
+    _test_injected_job_match_client = False
+    if client is not None and not client.is_closed and not is_injected:
+        await client.aclose()
+
+
+def set_job_match_client(client: Optional[httpx.AsyncClient], is_injected: bool = True) -> None:
+    """
+    Sets or resets the application client (useful for testing and dependency injection).
+    """
+    import asyncio
+    global _app_job_match_client, _app_job_match_loop, _test_injected_job_match_client
+    _app_job_match_client = client
+    _test_injected_job_match_client = bool(client is not None and is_injected)
+    if client is not None:
+        try:
+            _app_job_match_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _app_job_match_loop = None
+    else:
+        _app_job_match_loop = None
+
+
+def get_job_match_client() -> Optional[httpx.AsyncClient]:
+    """Returns the current application-managed JobMatch client, or None."""
+    return _app_job_match_client
+
+
+def get_job_match_client_loop() -> Optional[Any]:
+    """Returns the event loop that owns the current application-managed JobMatch client."""
+    return _app_job_match_loop
+
+
+def _get_active_job_match_client() -> tuple[Optional[httpx.AsyncClient], bool]:
+    """
+    Returns (client, is_pooled).
+    If a valid pooled client exists for the current running event loop and is open,
+    returns (pooled_client, True). Otherwise returns (None, False).
+    """
+    import asyncio
+    current_loop = None
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if (
+        _app_job_match_client is not None
+        and not _app_job_match_client.is_closed
+        and _app_job_match_loop is not None
+        and current_loop is not None
+        and _app_job_match_loop == current_loop
+        and not current_loop.is_closed()
+    ):
+        return _app_job_match_client, True
+    return None, False
+
+
 class JobMatchClient:
     """Async HTTP client for interacting with the deployed Job Match service."""
 
@@ -95,16 +197,21 @@ class JobMatchClient:
 
         log.info("[JobMatch] GET /v1/find-jobs for login_user_id=%s limit=%d", candidate_id, final_limit)
 
+        client, is_pooled = _get_active_job_match_client()
+        transient_client = None
+        if not is_pooled:
+            transient_client = httpx.AsyncClient(timeout=self.timeout)
+            client = transient_client
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url, params=params, headers=self._headers())
-                if response.status_code != 200:
-                    payload = {
-                        "candidate_id": int(candidate_id),
-                        "final_limit": int(final_limit),
-                        "filters": filters or {},
-                    }
-                    response = await client.post(url, json=payload, headers=self._headers())
+            response = await client.get(url, params=params, headers=self._headers())
+            if response.status_code != 200:
+                payload = {
+                    "candidate_id": int(candidate_id),
+                    "final_limit": int(final_limit),
+                    "filters": filters or {},
+                }
+                response = await client.post(url, json=payload, headers=self._headers())
 
             if response.status_code == 200:
                 data = response.json()
@@ -132,6 +239,9 @@ class JobMatchClient:
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError) as net_err:
             log.warning("[JobMatch] Network/Timeout error contacting Job Match API: %s", net_err)
             raise JobMatchUnavailableException(f"Network error contacting Job Match API: {net_err}") from net_err
+        finally:
+            if transient_client is not None and not transient_client.is_closed:
+                await transient_client.aclose()
 
     async def match_preview(self, candidate_id: int, job_id: int) -> Dict[str, Any]:
         """
@@ -150,12 +260,17 @@ class JobMatchClient:
 
         log.info("[JobMatch] GET /v1/match/preview for candidate_id=%s job_id=%s", candidate_id, job_id)
 
+        client, is_pooled = _get_active_job_match_client()
+        transient_client = None
+        if not is_pooled:
+            transient_client = httpx.AsyncClient(timeout=self.timeout)
+            client = transient_client
+
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url, params=params, headers=self._headers())
-                if response.status_code != 200:
-                    payload = {"candidate_id": int(candidate_id), "job_id": int(job_id), "weights": {}}
-                    response = await client.post(url, json=payload, headers=self._headers())
+            response = await client.get(url, params=params, headers=self._headers())
+            if response.status_code != 200:
+                payload = {"candidate_id": int(candidate_id), "job_id": int(job_id), "weights": {}}
+                response = await client.post(url, json=payload, headers=self._headers())
 
             if response.status_code == 200:
                 data = response.json()
@@ -178,6 +293,9 @@ class JobMatchClient:
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError) as net_err:
             log.warning("[JobMatch] Network/Timeout error on match_preview: %s", net_err)
             raise JobMatchUnavailableException(f"Network error on match_preview: {net_err}") from net_err
+        finally:
+            if transient_client is not None and not transient_client.is_closed:
+                await transient_client.aclose()
 
 
 # Singleton instance

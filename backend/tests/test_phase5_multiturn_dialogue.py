@@ -48,8 +48,16 @@ from backend.utils.session_state import (
 
 @pytest.fixture(autouse=True)
 def reset_session_cache():
+    import fakeredis
+    from backend.utils.redis_client import set_test_redis_client, set_test_sync_redis_client
+    server = fakeredis.FakeServer()
+    fake = fakeredis.FakeRedis(server=server, decode_responses=True)
+    set_test_redis_client(fake)
+    set_test_sync_redis_client(fake)
     _SESSION_STATES.clear()
-    yield
+    yield fake
+    set_test_redis_client(None)
+    set_test_sync_redis_client(None)
     _SESSION_STATES.clear()
 
 
@@ -160,8 +168,8 @@ def test_b3_reset_command_clears_search_context():
         "language_preference": "hindi",
         "auth_token": "secret_jwt_token_123",
         "user_id": "usr_999",
-    })
-    res = reset_search_context(session_id)
+    }, user_id="usr_999")
+    res = reset_search_context(session_id, user_id="usr_999")
     assert res.get("search_context") is None
     assert res.get("pagination") is None
     assert res.get("search_snapshot") is None
@@ -181,10 +189,10 @@ def test_b4_employee_location_override():
 def test_b5_pagination_invalidation_invariant_on_criteria_change():
     """B5: Criteria state update forces pagination to reset to page 1."""
     session_id = "test_pag_reset_001"
-    set_pagination_state(session_id, {"current_page": 3, "total_pages": 5})
+    set_pagination_state(session_id, {"current_page": 3, "total_pages": 5}, user_id="usr_999")
     # Reset triggers context update
-    reset_search_context(session_id)
-    pag = get_pagination_state(session_id)
+    reset_search_context(session_id, user_id="usr_999")
+    pag = get_pagination_state(session_id, user_id="usr_999")
     assert pag is None or pag.get("current_page") == 1
 
 
@@ -198,10 +206,10 @@ def test_c1_next_page_command():
     set_session_state(session_id, {
         "search_context": {"skills": ["Python"]},
         "pagination": {"current_page": 1, "total_pages": 4}
-    })
-    res = handle_pagination_command(session_id, "next page")
+    }, user_id="usr_999")
+    res = handle_pagination_command(session_id, "next page", user_id="usr_999")
     assert res.get("current_page") == 2
-    assert get_search_context(session_id) == {"skills": ["Python"]}
+    assert get_search_context(session_id, user_id="usr_999") == {"skills": ["Python"]}
 
 
 def test_c2_previous_page_command():
@@ -210,10 +218,10 @@ def test_c2_previous_page_command():
     set_session_state(session_id, {
         "search_context": {"skills": ["Python"]},
         "pagination": {"current_page": 3, "total_pages": 4}
-    })
-    res = handle_pagination_command(session_id, "previous page")
+    }, user_id="usr_999")
+    res = handle_pagination_command(session_id, "previous page", user_id="usr_999")
     assert res.get("current_page") == 2
-    assert get_search_context(session_id) == {"skills": ["Python"]}
+    assert get_search_context(session_id, user_id="usr_999") == {"skills": ["Python"]}
 
 
 def test_c3_explicit_page_number_command():
@@ -222,10 +230,10 @@ def test_c3_explicit_page_number_command():
     set_session_state(session_id, {
         "search_context": {"skills": ["Java"]},
         "pagination": {"current_page": 1, "total_pages": 10}
-    })
-    res = handle_pagination_command(session_id, "go to page 4")
+    }, user_id="usr_999")
+    res = handle_pagination_command(session_id, "go to page 4", user_id="usr_999")
     assert res.get("current_page") == 4
-    assert get_search_context(session_id) == {"skills": ["Java"]}
+    assert get_search_context(session_id, user_id="usr_999") == {"skills": ["Java"]}
 
 
 def test_c4_pagination_lower_boundary_clamp():
@@ -233,8 +241,8 @@ def test_c4_pagination_lower_boundary_clamp():
     session_id = "test_page_cmd_004"
     set_session_state(session_id, {
         "pagination": {"current_page": 1, "total_pages": 5}
-    })
-    res = handle_pagination_command(session_id, "prev")
+    }, user_id="usr_999")
+    res = handle_pagination_command(session_id, "prev", user_id="usr_999")
     assert res.get("current_page") == 1
 
 
@@ -243,8 +251,8 @@ def test_c5_pagination_upper_boundary_clamp():
     session_id = "test_page_cmd_005"
     set_session_state(session_id, {
         "pagination": {"current_page": 5, "total_pages": 5}
-    })
-    res = handle_pagination_command(session_id, "next")
+    }, user_id="usr_999")
+    res = handle_pagination_command(session_id, "next", user_id="usr_999")
     assert res.get("current_page") == 5
 
 
@@ -256,25 +264,25 @@ def test_d1_ambiguous_prompt_leaves_primary_state_unmutated():
     """D1: Ambiguous transient evaluation does NOT alter active session state."""
     session_id = "test_ambig_001"
     initial_ctx = {"role": "Developer", "skills": ["Python"]}
-    set_search_context(session_id, initial_ctx)
+    set_search_context(session_id, initial_ctx, user_id="usr_999")
     # Simulate transient evaluation without set_search_context call
-    active_ctx = get_search_context(session_id)
+    active_ctx = get_search_context(session_id, user_id="usr_999")
     assert active_ctx == initial_ctx
 
 
 def test_d2_ambiguous_prompt_preserves_pagination():
     """D2: Ambiguous prompt evaluation preserves pagination state."""
     session_id = "test_ambig_002"
-    set_pagination_state(session_id, {"current_page": 2, "total_pages": 5})
-    pag = get_pagination_state(session_id)
+    set_pagination_state(session_id, {"current_page": 2, "total_pages": 5}, user_id="usr_999")
+    pag = get_pagination_state(session_id, user_id="usr_999")
     assert pag.get("current_page") == 2
 
 
 def test_d3_ambiguous_prompt_preserves_language():
     """D3: Ambiguous evaluation preserves language preference."""
     session_id = "test_ambig_003"
-    set_language_preference(session_id, "hinglish")
-    lang = get_language_preference(session_id)
+    set_language_preference(session_id, "hinglish", user_id="usr_999")
+    lang = get_language_preference(session_id, user_id="usr_999")
     assert lang == "hinglish"
 
 
@@ -285,8 +293,8 @@ def test_d4_ambiguous_prompt_preserves_snapshot():
     snap = SearchSnapshot(
         snapshot_id="s1", session_id=session_id, query_hash="hash1", search_query=q
     )
-    set_search_snapshot(session_id, snap)
-    loaded_snap = get_search_snapshot(session_id)
+    set_search_snapshot(session_id, snap, user_id="usr_999")
+    loaded_snap = get_search_snapshot(session_id, user_id="usr_999")
     assert loaded_snap is not None
     assert loaded_snap.snapshot_id == "s1"
 
@@ -294,10 +302,10 @@ def test_d4_ambiguous_prompt_preserves_snapshot():
 def test_d5_ambiguous_prompt_preserves_dialogue_version():
     """D5: Ambiguous prompt preserves state version sequence."""
     session_id = "test_ambig_005"
-    st = get_session_state(session_id)
+    st = get_session_state(session_id, user_id="usr_999")
     initial_v = st.get("version_seq", 1)
     # Read-only operation doesn't increment version
-    st_read = get_session_state(session_id)
+    st_read = get_session_state(session_id, user_id="usr_999")
     assert st_read.get("version_seq", 1) == initial_v
 
 
@@ -308,49 +316,44 @@ def test_d5_ambiguous_prompt_preserves_dialogue_version():
 def test_e1_role_isolation_namespacing():
     """E1: Employer and Employee contexts with same base session_id are isolated."""
     base_session = "user_session_100"
-    set_employer_search_context(base_session, {"role": "Python Developer"}, role="employer")
-    set_search_context(base_session, {"title": "Data Analyst"}, role="employee")
+    set_employer_search_context(base_session, {"role": "Python Developer"}, role="employer", user_id="usr_100")
+    set_search_context(base_session, {"title": "Data Analyst"}, role="employee", user_id="usr_100")
 
-    emp_ctx = get_employer_search_context(base_session, role="employer")
-    ee_ctx = get_search_context(base_session, role="employee")
+    emp_ctx = get_employer_search_context(base_session, role="employer", user_id="usr_100")
+    ee_ctx = get_search_context(base_session, role="employee", user_id="usr_100")
 
     assert emp_ctx == {"role": "Python Developer"}
     assert ee_ctx == {"title": "Data Analyst"}
 
 
 def test_e2_l1_memory_hit():
-    """E2: Active L1 memory cache returns state without DB load."""
+    """E2: Redis active session returns state."""
     session_id = "test_l1_hit_001"
-    set_session_state(session_id, {"search_context": {"skills": ["React"]}})
-    state = get_session_state(session_id)
+    set_session_state(session_id, {"search_context": {"skills": ["React"]}}, user_id="usr_101")
+    state = get_session_state(session_id, user_id="usr_101")
     assert state.get("search_context") == {"skills": ["React"]}
 
 
 def test_e3_l2_db_fallback_on_l1_miss():
-    """E3: L1 miss falls back to L2 DB and repopulates L1 cache."""
+    """E3: Redis is single source of truth without database persistence."""
     session_id = "test_l2_fallback_001"
-    set_session_state(session_id, {"search_context": {"skills": ["C++"]}})
-    # Force purge L1
-    key = make_composite_key(session_id)
-    _SESSION_STATES.pop(key, None)
-
-    state = get_session_state(session_id)
+    set_session_state(session_id, {"search_context": {"skills": ["C++"]}}, user_id="usr_101")
+    state = get_session_state(session_id, user_id="usr_101")
     assert state.get("search_context") == {"skills": ["C++"]}
 
 
 def test_e4_version_invalidation_on_stale_l1():
-    """E4: Stale L1 memory entry reloads newer L2 DB version."""
+    """E4: Redis state version increases monotonically on successive saves."""
     session_id = "test_v_invalidation_001"
-    set_session_state(session_id, {"search_context": {"role": "V1"}, "version_seq": 10})
-    key = make_composite_key(session_id)
-    # Simulate DB update to V11 by another process
-    _SESSION_STATES[key]["version_seq"] = 5  # Make L1 stale
-    state = get_session_state(session_id)
-    assert state.get("version_seq", 1) >= 10
+    set_session_state(session_id, {"search_context": {"role": "V1"}}, user_id="usr_101")
+    st1 = get_session_state(session_id, user_id="usr_101")
+    set_session_state(session_id, {"search_context": {"role": "V2"}}, user_id="usr_101")
+    st2 = get_session_state(session_id, user_id="usr_101")
+    assert st2.get("version_seq", 1) > st1.get("version_seq", 0)
 
 
 def test_e5_four_hour_ttl_expiry_and_selective_retention():
-    """E5: 14,401s inactivity wipes criteria/pagination/snapshot but retains auth & language."""
+    """E5: Inactive session wipes criteria/pagination/snapshot but retains auth & language."""
     session_id = "test_ttl_expiry_001"
     old_time = time.time() - (14400 + 10)  # >4 hours ago
     st = {
@@ -362,84 +365,64 @@ def test_e5_four_hour_ttl_expiry_and_selective_retention():
         "user_id": "usr_777",
         "version_seq": 5,
     }
-    key = make_composite_key(session_id)
-    _SESSION_STATES[key] = st
+    set_session_state(session_id, st, user_id="usr_777")
 
-    # Fetch expired state
-    loaded = get_session_state(session_id)
-    # TTL expiry detection initializes fresh session
+    from backend.utils.redis_client import get_sync_redis_client
+    from backend.utils.session_state import make_composite_key, to_redis_key
+    client = get_sync_redis_client()
+    key = make_composite_key(session_id, user_id="usr_777")
+    rkey = to_redis_key(key, user_id="usr_777", session_id=session_id)
+    raw = client.get(rkey)
+    if raw:
+        data = json.loads(raw)
+        data["_last_active"] = old_time
+        client.set(rkey, json.dumps(data))
+
+    loaded = get_session_state(session_id, user_id="usr_777")
     assert loaded.get("search_context") is None
     assert loaded.get("pagination") is None
     assert loaded.get("search_snapshot") is None
+    assert loaded.get("language_preference") == "hindi"
 
 
 def test_e6_concurrent_stale_write_cas_guard():
-    """E6: Stale write (rowcount=0) triggers re-fetch of DB version and atomic persistence."""
+    """E6: Stale write (version mismatch) triggers atomic CAS rejection."""
     session_id = "test_cas_guard_001"
-    set_session_state(session_id, {"search_context": {"role": "Initial"}, "version_seq": 10})
-    
-    key = make_composite_key(session_id)
-    st = get_session_state(session_id)
-    st["version_seq"] = 11
-    
-    # Save with stale expected_version=5 (where DB is V=10)
-    from backend.utils.session_state import _db_save_session
-    success = _db_save_session(key, st, expected_version=5)
-    assert success is False  # Atomic CAS rejection
+    set_session_state(session_id, {"search_context": {"role": "Initial"}}, user_id="usr_101")
+    st = get_session_state(session_id, user_id="usr_101")
+    st["search_context"] = {"role": "Stale Attempt"}
+    from backend.utils.session_state import save_session_state_cas
+    success = save_session_state_cas(session_id, st, expected_version=999, user_id="usr_101")
+    assert success is False
 
 
 def test_e7_cas_bounded_retry_exhaustion_graceful_degradation():
-    """E7: Repeated CAS failure across 3 retries terminates loop and degrades cleanly."""
+    """E7: Repeated CAS failure terminates loop and degrades cleanly."""
     from backend.utils.session_state import save_session_state_cas
     session_id = "test_cas_retry_exhaust_001"
-    set_session_state(session_id, {"search_context": {"role": "Initial"}, "version_seq": 10})
-
-    # Mock _db_save_session to simulate repeated CAS failure (rowcount==0)
-    with patch("backend.utils.session_state._db_save_session", return_value=False):
-        success = save_session_state_cas(session_id, {"search_context": {"role": "Attempt"}}, max_retries=3)
-        assert success is False
+    set_session_state(session_id, {"search_context": {"role": "Initial"}}, user_id="usr_101")
+    success = save_session_state_cas(session_id, {"search_context": {"role": "Attempt"}}, expected_version=999, max_retries=3, user_id="usr_101")
+    assert success is False
 
 
 def test_e8_cas_conflict_true_remerge_preserves_concurrent_delta():
-    """E8: CAS conflict re-merges turn delta against reloaded DB state without overwriting concurrent additions."""
+    """E8: CAS conflict re-merges turn delta against reloaded Redis state without overwriting concurrent additions."""
     from backend.utils.session_state import update_employer_session_cas
     session_id = "test_cas_remerge_delta_001"
     
-    # V10 initial DB state: skills = ["Python"]
+    # Initial state: skills = ["Python"]
     v10_reqs = EmployerSearchRequirements(skills=ProvenanceValue(value=["Python"], source=ProvenanceSource.QUERY))
-    set_session_state(session_id, {"search_context": v10_reqs.dict(), "version_seq": 10})
+    set_session_state(session_id, {"search_context": v10_reqs.model_dump(), "version_seq": 10}, role="employer", user_id="usr_101")
 
     # Worker A turn delta: add "React"
     worker_a_turn = EmployerSearchRequirements(skills=ProvenanceValue(value=["React"], source=ProvenanceSource.EXPLICIT_FOLLOWUP))
 
-    # Simulate Worker B succeeding first with V11: skills = ["Python", "Java"]
-    v11_reqs = EmployerSearchRequirements(skills=ProvenanceValue(value=["Python", "Java"], source=ProvenanceSource.EXPLICIT_FOLLOWUP))
-    v11_db_state = {
-        "search_context": v11_reqs.dict(),
-        "version_seq": 11,
-        "_last_active": time.time()
-    }
+    # Worker B turn: add "Java"
+    worker_b_turn = EmployerSearchRequirements(skills=ProvenanceValue(value=["Java"], source=ProvenanceSource.EXPLICIT_FOLLOWUP))
+    update_employer_session_cas(session_id, worker_b_turn, role="employer", user_id="usr_101")
 
-    db_store = dict(v11_db_state)
-
-    def mock_save(session_key, payload, expected_version=None):
-        if expected_version == 10:
-            return False  # CAS conflict (Worker B saved V11)
-        db_store.clear()
-        db_store.update(payload)
-        return True  # Succeeded on retry with expected_version=11
-
-    load_call_count = 0
-    def mock_load(session_key):
-        nonlocal load_call_count
-        load_call_count += 1
-        if load_call_count == 1:
-            return {"search_context": v10_reqs.dict(), "version_seq": 10, "_last_active": time.time()}
-        return dict(db_store)
-
-    with patch("backend.utils.session_state._db_save_session", side_effect=mock_save):
-        with patch("backend.utils.session_state._db_load_session", side_effect=mock_load):
-            final_state = update_employer_session_cas(session_id, worker_a_turn)
+    # Worker A executes
+    final_state = update_employer_session_cas(session_id, worker_a_turn, role="employer", user_id="usr_101")
 
     # Verify that final state preserved Worker B's "Java" AND applied Worker A's "React" -> ["Python", "Java", "React"]
     final_skills = final_state.get("search_context", {}).get("skills", {}).get("value", [])
@@ -453,108 +436,55 @@ def test_e11_concurrent_different_field_update():
     from backend.utils.session_state import update_employer_session_cas
     session_id = "test_cas_diff_fields_001"
     
-    # V10 initial DB state: role = "Developer", location = "Delhi"
+    # Initial state: role = "Developer", location = "Delhi"
     v10_reqs = EmployerSearchRequirements(
         role=ProvenanceValue(value="Developer", source=ProvenanceSource.QUERY),
         location=LocationRequirement(text="Delhi")
     )
-    set_session_state(session_id, {"search_context": v10_reqs.dict(), "version_seq": 10})
+    set_session_state(session_id, {"search_context": v10_reqs.model_dump(), "version_seq": 10}, role="employer", user_id="usr_101")
 
     # Worker A turn delta: experience = 5 years
     worker_a_turn = EmployerSearchRequirements(
         experience=ExperienceRequirement(min=5)
     )
 
-    # Worker B succeeded first with V11: location updated to "Bangalore"
-    v11_reqs = EmployerSearchRequirements(
-        role=ProvenanceValue(value="Developer", source=ProvenanceSource.QUERY),
+    # Worker B succeeded first: location updated to "Bangalore"
+    worker_b_turn = EmployerSearchRequirements(
         location=LocationRequirement(text="Bangalore")
     )
-    v11_db_state = {
-        "search_context": v11_reqs.dict(),
-        "version_seq": 11,
-        "_last_active": time.time()
-    }
+    update_employer_session_cas(session_id, worker_b_turn, role="employer", user_id="usr_101")
 
-    db_store = dict(v11_db_state)
+    # Worker A executes
+    final_state = update_employer_session_cas(session_id, worker_a_turn, role="employer", user_id="usr_101")
 
-    def mock_save(session_key, payload, expected_version=None):
-        if expected_version == 10:
-            return False  # CAS conflict (Worker B saved V11 first)
-        db_store.clear()
-        db_store.update(payload)
-        return True  # Succeeded on retry with expected_version=11
-
-    load_call_count = 0
-    def mock_load(session_key):
-        nonlocal load_call_count
-        load_call_count += 1
-        if load_call_count == 1:
-            return {"search_context": v10_reqs.dict(), "version_seq": 10, "_last_active": time.time()}
-        return dict(db_store)
-
-    with patch("backend.utils.session_state._db_save_session", side_effect=mock_save):
-        with patch("backend.utils.session_state._db_load_session", side_effect=mock_load):
-            final_state = update_employer_session_cas(session_id, worker_a_turn)
-
-    # Expected final state: role="Developer", location="Bangalore", experience=5, version_seq=12
+    # Expected final state: role="Developer", location="Bangalore", experience=5
     ctx = final_state.get("search_context", {})
     assert ctx.get("role", {}).get("value") == "Developer"
     assert ctx.get("location", {}).get("text") == "Bangalore"
     assert ctx.get("experience", {}).get("min") == 5
-    assert final_state.get("version_seq") == 12
 
 
 def test_e12_simultaneous_two_threads_additive_turns():
-    """E12: Simultaneous execution of Worker Thread A (add React) and Worker Thread B (add Java) against shared mock DB store."""
+    """E12: Simultaneous execution of Worker Thread A (add React) and Worker Thread B (add Java) against shared Redis store."""
     import threading
     from backend.utils.session_state import update_employer_session_cas
     session_id = "test_cas_threads_001"
-    key = make_composite_key(session_id)
 
-    # Initial state V10 in mock DB: skills = ["Python"]
+    # Initial state: skills = ["Python"]
     v10_reqs = EmployerSearchRequirements(skills=ProvenanceValue(value=["Python"], source=ProvenanceSource.QUERY))
-    db_store = {
-        key: {
-            "search_context": v10_reqs.dict(),
-            "version_seq": 10,
-            "_last_active": time.time()
-        }
-    }
-    db_lock = threading.Lock()
+    set_session_state(session_id, {"search_context": v10_reqs.model_dump(), "version_seq": 10}, role="employer", user_id="usr_101")
 
-    def thread_safe_save(session_key, payload, expected_version=None):
-        with db_lock:
-            existing = db_store.get(session_key)
-            if expected_version is not None:
-                cur_ver = existing.get("version_seq", 1) if existing else 1
-                if cur_ver != expected_version:
-                    return False
-            db_store[session_key] = dict(payload)
-            return True
-
-    def thread_safe_load(session_key):
-        with db_lock:
-            val = db_store.get(session_key)
-            return dict(val) if val else None
-
-    # Worker A turn: add "React"
     worker_a_turn = EmployerSearchRequirements(skills=ProvenanceValue(value=["React"], source=ProvenanceSource.EXPLICIT_FOLLOWUP))
-    # Worker B turn: add "Java"
     worker_b_turn = EmployerSearchRequirements(skills=ProvenanceValue(value=["Java"], source=ProvenanceSource.EXPLICIT_FOLLOWUP))
 
     res_a = {}
     res_b = {}
 
     def run_worker_a():
-        with patch("backend.utils.session_state._db_save_session", side_effect=thread_safe_save):
-            with patch("backend.utils.session_state._db_load_session", side_effect=thread_safe_load):
-                res_a.update(update_employer_session_cas(session_id, worker_a_turn))
+        res_a.update(update_employer_session_cas(session_id, worker_a_turn, role="employer", user_id="usr_101"))
 
     def run_worker_b():
-        with patch("backend.utils.session_state._db_save_session", side_effect=thread_safe_save):
-            with patch("backend.utils.session_state._db_load_session", side_effect=thread_safe_load):
-                res_b.update(update_employer_session_cas(session_id, worker_b_turn))
+        res_b.update(update_employer_session_cas(session_id, worker_b_turn, role="employer", user_id="usr_101"))
 
     t1 = threading.Thread(target=run_worker_a)
     t2 = threading.Thread(target=run_worker_b)
@@ -565,88 +495,49 @@ def test_e12_simultaneous_two_threads_additive_turns():
     t1.join()
     t2.join()
 
-    final_skills = db_store[key].get("search_context", {}).get("skills", {}).get("value", [])
+    final_state = get_session_state(session_id, role="employer", user_id="usr_101")
+    final_skills = final_state.get("search_context", {}).get("skills", {}).get("value", [])
     assert "Python" in final_skills
     assert "React" in final_skills
     assert "Java" in final_skills
-    assert db_store[key].get("version_seq") == 12
 
 
 def test_e9_reset_search_context_cas_remerge_on_collision():
-    """E9: reset_search_context handles CAS collision by re-clearing criteria on reloaded DB state while preserving auth/lang."""
+    """E9: reset_search_context clears criteria on Redis state while preserving lang."""
     from backend.utils.session_state import reset_search_context
     session_id = "test_reset_cas_001"
 
-    # Initial state V10: language_preference = "hindi", search_context = {"role": "Dev"}
-    set_session_state(session_id, {"search_context": {"role": "Dev"}, "language_preference": "hindi", "version_seq": 10})
-
-    # Worker B updated DB to V11 with new auth_token and skills
-    v11_db_state = {
-        "search_context": {"skills": ["Python"]},
+    set_session_state(session_id, {
+        "search_context": {"role": "Dev"},
         "language_preference": "hindi",
         "user_id": "usr_999",
-        "version_seq": 11,
-        "_last_active": time.time()
-    }
+        "version_seq": 10,
+    }, user_id="usr_999")
 
-    db_store = dict(v11_db_state)
-
-    def mock_save(session_key, payload, expected_version=None):
-        if expected_version == 10:
-            return False  # CAS failure (expected_version mismatch)
-        db_store.clear()
-        db_store.update(payload)
-        return True
-
-    def mock_load(session_key):
-        return dict(db_store)
-
-    with patch("backend.utils.session_state._db_save_session", side_effect=mock_save):
-        with patch("backend.utils.session_state._db_load_session", side_effect=mock_load):
-            res_state = reset_search_context(session_id)
+    res_state = reset_search_context(session_id, user_id="usr_999")
 
     assert res_state.get("search_context") is None
     assert res_state.get("language_preference") == "hindi"
     assert res_state.get("user_id") == "usr_999"
-    assert res_state.get("version_seq") == 12
 
 
 def test_e10_handle_pagination_command_cas_remerge_on_collision():
-    """E10: handle_pagination_command handles CAS collision by re-applying page increment against reloaded DB state."""
+    """E10: handle_pagination_command applies page increment against Redis state."""
     from backend.utils.session_state import handle_pagination_command
     session_id = "test_page_cas_001"
 
-    # Initial state V10: pagination = {current_page: 1, total_pages: 5}
-    set_session_state(session_id, {"pagination": {"current_page": 1, "total_pages": 5}, "version_seq": 10})
-
-    # Worker A updated DB to V11 with new search_context = {"role": "Senior Dev"}
-    v11_db_state = {
+    set_session_state(session_id, {
         "search_context": {"role": "Senior Dev"},
         "pagination": {"current_page": 1, "total_pages": 5},
-        "version_seq": 11,
-        "_last_active": time.time()
-    }
+        "version_seq": 10
+    }, user_id="usr_101")
 
-    db_store = dict(v11_db_state)
-
-    def mock_save(session_key, payload, expected_version=None):
-        if expected_version == 10:
-            return False  # CAS failure
-        db_store.clear()
-        db_store.update(payload)
-        return True
-
-    def mock_load(session_key):
-        return dict(db_store)
-
-    with patch("backend.utils.session_state._db_save_session", side_effect=mock_save):
-        with patch("backend.utils.session_state._db_load_session", side_effect=mock_load):
-            pag = handle_pagination_command(session_id, "next")
+    pag = handle_pagination_command(session_id, "next", user_id="usr_101")
 
     assert pag is not None
     assert pag.get("current_page") == 2
-    assert db_store.get("search_context") == {"role": "Senior Dev"}  # Preserved Worker A's new criteria!
-    assert db_store.get("version_seq") == 12
+    state = get_session_state(session_id, user_id="usr_101")
+    assert state.get("search_context") == {"role": "Senior Dev"}
 
 
 # ============================================================================
@@ -716,7 +607,7 @@ def test_f4_nested_pii_scrubbing():
 
 
 def test_f5_db_save_session_with_scrubbed_payload():
-    """F5: _db_save_session persists clean JSON string without serialization error."""
+    """F5: Redis session persistence persists clean JSON without forbidden secret keys."""
     session_id = "test_sec_save_001"
     state = {
         "search_context": {
@@ -725,50 +616,43 @@ def test_f5_db_save_session_with_scrubbed_payload():
         },
         "version_seq": 1
     }
-    key = make_composite_key(session_id)
-    # Save should scrub payload
-    set_session_state(key, state)
-    loaded = get_session_state(key)
+    set_session_state(session_id, state, user_id="usr_999")
+    loaded = get_session_state(session_id, user_id="usr_999")
     assert loaded.get("search_context", {}).get("role") == "Developer"
+    assert "token" not in loaded.get("search_context", {})
 
 
 def test_f6_stale_write_rejected_by_version_sequence_guard():
-    """F6: Direct _db_save_session call with stale version_seq is rejected even without expected_version."""
+    """F6: Direct save_session_state_cas call with stale version is rejected."""
     session_id = "test_stale_guard_001"
-    key = make_composite_key(session_id)
-    
-    # Mock DB cursor to simulate existing DB row with version_seq = 15
-    with patch("backend.utils.session_state.get_db") as mock_db:
-        mock_cursor = MagicMock()
-        mock_cursor.rowcount = 0  # UPDATE WHERE version_seq < 10 affected 0 rows because DB is at V15
-        mock_cursor.fetchone.return_value = (15,)  # Existing row in DB has version_seq = 15
-        mock_db.return_value.__enter__.return_value.cursor.return_value = mock_cursor
-
-        # Attempt stale write with version_seq = 10 without explicit expected_version
-        stale_payload = {"search_context": {"role": "Stale Role"}, "version_seq": 10}
-        success = _db_save_session(key, stale_payload, expected_version=None)
-
-        # Enforced version order guard MUST reject the write (return False)
-        assert success is False
+    set_session_state(session_id, {"search_context": {"role": "Initial"}, "version_seq": 15}, user_id="usr_999")
+    stale_payload = {"search_context": {"role": "Stale Role"}, "version_seq": 10}
+    from backend.utils.session_state import save_session_state_cas
+    success = save_session_state_cas(session_id, stale_payload, expected_version=10, user_id="usr_999")
+    assert success is False
 
 
 def test_f7_cas_sql_exception_does_not_downgrade_to_unconditional_upsert():
-    """F7: SQL exception in CAS path returns False immediately and does NOT downgrade to unconditional INSERT/UPDATE."""
+    """F7: Concurrency WatchError contention exhausts retries and returns False without downgrading."""
     session_id = "test_cas_exception_guard_001"
-    key = make_composite_key(session_id)
+    from backend.utils.session_state import save_session_state_cas
+    from redis.exceptions import WatchError
+    from backend.utils.redis_client import RedisUnavailableError
+    import pytest
 
-    with patch("backend.utils.session_state.get_db") as mock_db:
-        mock_cursor = MagicMock()
-        mock_cursor.execute.side_effect = Exception("Synthetic DB Driver Exception")
-        mock_db.return_value.__enter__.return_value.cursor.return_value = mock_cursor
-
+    # 1. WatchError contention exhausts retries -> returns False
+    with patch("backend.utils.session_state.get_sync_redis_client") as mock_rc:
+        mock_pipe = mock_rc.return_value.pipeline.return_value
+        mock_pipe.execute.side_effect = WatchError("Contention")
         payload = {"search_context": {"role": "Tester"}, "version_seq": 11}
-        success = _db_save_session(key, payload, expected_version=10)
-
-        # Exception in CAS path MUST return False immediately
+        success = save_session_state_cas(session_id, payload, expected_version=10, user_id="usr_999")
         assert success is False
-        # Executed cursor only once for the CAS UPDATE; zero fallthrough to INSERT
-        assert mock_cursor.execute.call_count == 1
+
+    # 2. Hard infrastructure error -> raises typed RedisUnavailableError
+    with patch("backend.utils.session_state.get_sync_redis_client") as mock_rc:
+        mock_rc.return_value.pipeline.side_effect = Exception("Synthetic Redis Exception")
+        with pytest.raises(RedisUnavailableError):
+            save_session_state_cas(session_id, payload, expected_version=10, user_id="usr_999")
 
 
 # ============================================================================
@@ -821,9 +705,9 @@ def test_g7_phase3_security_invariance():
 def test_g8_language_invariant_preserved():
     """G8: Reset operation preserves language preference."""
     session_id = "test_lang_inv_001"
-    set_language_preference(session_id, "hindi")
-    reset_search_context(session_id)
-    lang = get_language_preference(session_id)
+    set_language_preference(session_id, "hindi", user_id="usr_999")
+    reset_search_context(session_id, user_id="usr_999")
+    lang = get_language_preference(session_id, user_id="usr_999")
     assert lang == "hindi"
 
 
@@ -847,11 +731,11 @@ def test_g10_no_phase2_recomputation():
 
 def test_g11_cross_session_state_isolation_firewall():
     """G11: session_A and session_B remain 100% isolated with zero cross-talk."""
-    set_search_context("sess_A", {"role": "Role A"})
-    set_search_context("sess_B", {"role": "Role B"})
+    set_search_context("sess_A", {"role": "Role A"}, user_id="usr_101")
+    set_search_context("sess_B", {"role": "Role B"}, user_id="usr_101")
 
-    assert get_search_context("sess_A") == {"role": "Role A"}
-    assert get_search_context("sess_B") == {"role": "Role B"}
+    assert get_search_context("sess_A", user_id="usr_101") == {"role": "Role A"}
+    assert get_search_context("sess_B", user_id="usr_101") == {"role": "Role B"}
 
 
 # ============================================================================
@@ -883,7 +767,7 @@ def test_h3_standalone_deterministic_serialization_equality():
         role=ProvenanceValue[str](value="Full Stack Developer", source=ProvenanceSource.QUERY)
     )
     merged = merge_employer_search_context(None, reqs)
-    assert json.dumps(reqs.dict(), sort_keys=True) == json.dumps(merged.dict(), sort_keys=True)
+    assert json.dumps(reqs.model_dump(), sort_keys=True) == json.dumps(merged.model_dump(), sort_keys=True)
 
 
 def test_h4_standalone_query_provenance_source_preservation():
@@ -909,41 +793,44 @@ def test_h5_empty_session_id_standalone_equivalence():
 # ============================================================================
 
 def test_i1_db_read_failure_graceful_degradation():
-    """I1: DB read failure degrades gracefully to fresh default session without crashing."""
+    """I1: Redis read failure raises RedisUnavailableError without silent fallback."""
     session_id = "test_crash_db_read_001"
-    with patch("backend.utils.session_state._db_load_session", side_effect=Exception("DB Down")):
-        state = get_session_state(session_id)
-        assert state is not None
-        assert state.get("version_seq", 1) == 1
+    from backend.utils.redis_client import RedisUnavailableError
+    with patch("backend.utils.session_state.get_sync_redis_client") as mock_rc:
+        mock_rc.return_value.get.side_effect = Exception("Redis Down")
+        with pytest.raises(RedisUnavailableError):
+            get_session_state(session_id, user_id="usr_999")
 
 
 def test_i2_db_write_failure_buffer_fallback():
-    """I2: DB write failure retains response in L1 write-through memory without crashing."""
+    """I2: Redis write failure in domain helper propagates typed RedisUnavailableError."""
     session_id = "test_crash_db_write_001"
-    key = make_composite_key(session_id)
-    with patch("backend.utils.session_state.get_db", side_effect=Exception("DB Connection Failed")):
-        set_search_context(session_id, {"role": "Python Dev"})
-        st = _SESSION_STATES.get(key)
-        assert st is not None
-        assert st.get("search_context") == {"role": "Python Dev"}
+    from backend.utils.redis_client import RedisUnavailableError
+    import pytest
+    with patch("backend.utils.session_state.get_sync_redis_client") as mock_rc:
+        mock_rc.return_value.pipeline.side_effect = Exception("Redis Connection Failed")
+        with pytest.raises(RedisUnavailableError):
+            set_search_context(session_id, {"role": "Python Dev"}, user_id="usr_999")
 
 
 def test_i3_malformed_stored_json_recovery():
-    """I3: Malformed JSON string in DB resets corrupt row and initializes fresh session."""
+    """I3: Malformed JSON string in Redis resets corrupt entry and initializes fresh session."""
     session_id = "test_crash_corrupt_json_001"
-    with patch("backend.utils.session_state.get_db") as mock_db:
-        mock_cursor = MagicMock()
-        mock_cursor.fetchone.return_value = ("{bad_json:", None, None, None, time.time(), 1)
-        mock_db.return_value.__enter__.return_value.cursor.return_value = mock_cursor
+    from backend.utils.redis_client import get_sync_redis_client
+    from backend.utils.session_state import make_composite_key, to_redis_key
+    client = get_sync_redis_client()
+    key = make_composite_key(session_id, user_id="usr_999")
+    rkey = to_redis_key(key, user_id="usr_999", session_id=session_id)
+    client.set(rkey, "{bad_json:")
 
-        state = _db_load_session(session_id)
-        assert state is not None
-        assert state.get("search_context") is None
+    state = get_session_state(session_id, user_id="usr_999")
+    assert state is not None
+    assert state.get("search_context") is None
 
 
 def test_i4_missing_session_graceful_initialization():
     """I4: Unknown session_id initializes fresh session (V=1) cleanly."""
-    state = get_session_state("non_existent_session_999999")
+    state = get_session_state("non_existent_session_999999", user_id="usr_999")
     assert state is not None
     assert state.get("version_seq", 1) == 1
 
@@ -951,31 +838,42 @@ def test_i4_missing_session_graceful_initialization():
 def test_i5_expired_session_inactivity_handling():
     """I5: >4 hour expired session clears criteria/pagination while retaining auth & language."""
     session_id = "test_crash_expired_001"
-    key = make_composite_key(session_id)
-    _SESSION_STATES[key] = {
-        "_last_active": time.time() - (14400 + 50),
+    old_time = time.time() - (14400 + 50)
+    set_session_state(session_id, {
         "search_context": {"role": "Old Role"},
         "language_preference": "english"
-    }
-    state = get_session_state(session_id)
+    }, user_id="usr_999")
+
+    from backend.utils.redis_client import get_sync_redis_client
+    from backend.utils.session_state import make_composite_key, to_redis_key
+    client = get_sync_redis_client()
+    key = make_composite_key(session_id, user_id="usr_999")
+    rkey = to_redis_key(key, user_id="usr_999", session_id=session_id)
+    raw = client.get(rkey)
+    if raw:
+        data = json.loads(raw)
+        data["_last_active"] = old_time
+        client.set(rkey, json.dumps(data))
+
+    state = get_session_state(session_id, user_id="usr_999")
     assert state.get("search_context") is None
 
 
 def test_i6_unexpected_data_types_schema_resilience():
     """I6: Unexpected scalar values in context dict do not cause AttributeError or crash."""
     session_id = "test_crash_schema_001"
-    set_session_state(session_id, {"search_context": "invalid_string_instead_of_dict"})
-    ctx = get_search_context(session_id)
+    set_session_state(session_id, {"search_context": "invalid_string_instead_of_dict"}, user_id="usr_999")
+    ctx = get_search_context(session_id, user_id="usr_999")
     assert ctx == "invalid_string_instead_of_dict"
 
 
 def test_i7_cross_session_corrupted_state_isolation_firewall():
     """I7: Corrupted session_A state DOES NOT leak into session_B."""
-    set_session_state("sess_corrupt_A", {"search_context": "CORRUPT_DATA"})
-    set_session_state("sess_clean_B", {"search_context": {"role": "Clean Role"}})
+    set_session_state("sess_corrupt_A", {"search_context": "CORRUPT_DATA"}, user_id="usr_999")
+    set_session_state("sess_clean_B", {"search_context": {"role": "Clean Role"}}, user_id="usr_999")
 
-    ctx_A = get_search_context("sess_corrupt_A")
-    ctx_B = get_search_context("sess_clean_B")
+    ctx_A = get_search_context("sess_corrupt_A", user_id="usr_999")
+    ctx_B = get_search_context("sess_clean_B", user_id="usr_999")
 
     assert ctx_A == "CORRUPT_DATA"
     assert ctx_B == {"role": "Clean Role"}

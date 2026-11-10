@@ -1,0 +1,151 @@
+{
+  "version": "1.0",
+  "description": "Synthetic deterministic evaluation dataset for CollarCheck Phase 2 Step 3A retrieval quality and grounding.",
+  "cases": [
+    {
+      "case_id": "CASE-01",
+      "category": "straightforward_search",
+      "query": "Find senior backend Python jobs in Delhi",
+      "prior_context": null,
+      "retrieved_ids": ["job_101", "job_103", "job_102"],
+      "expected_relevant_ids": ["job_101", "job_103"],
+      "expected_selected_id": null,
+      "expected_facts": ["Python", "Delhi"],
+      "forbidden_facts": [],
+      "expected_behavior": "retrieves_relevant_subset",
+      "evaluated_metrics": ["context_precision", "context_recall"]
+    },
+    {
+      "case_id": "CASE-02",
+      "category": "filter_refinement",
+      "query": "Only remote ones",
+      "prior_context": {
+        "title": "Software Developer",
+        "location": "Bengaluru"
+      },
+      "retrieved_ids": ["job_202", "job_203", "job_201"],
+      "expected_relevant_ids": ["job_202", "job_203"],
+      "expected_selected_id": null,
+      "expected_facts": ["remote"],
+      "forbidden_facts": [],
+      "expected_behavior": "applies_filter_delta_preserves_context",
+      "evaluated_metrics": ["context_precision", "context_recall"]
+    },
+    {
+      "case_id": "CASE-03",
+      "category": "ordinal_resolution",
+      "query": "Tell me about the third job",
+      "prior_context": {
+        "active_pool": ["job_301", "job_302", "job_303"]
+      },
+      "retrieved_ids": ["job_303"],
+      "expected_relevant_ids": ["job_303"],
+      "expected_selected_id": "job_303",
+      "expected_facts": ["Data Scientist", "Job 303"],
+      "forbidden_facts": ["Job 301", "Job 302"],
+      "expected_behavior": "resolves_exact_third_ordinal",
+      "evaluated_metrics": ["entity_id_grounding", "deterministic_grounding"]
+    },
+    {
+      "case_id": "CASE-04",
+      "category": "salary_lookup_present",
+      "query": "What is the salary for the second one?",
+      "prior_context": {
+        "active_pool": ["job_401", "job_402"]
+      },
+      "retrieved_ids": ["job_402"],
+      "expected_relevant_ids": ["job_402"],
+      "expected_selected_id": "job_402",
+      "expected_facts": ["25 LPA"],
+      "forbidden_facts": ["50 LPA", "Not specified"],
+      "expected_behavior": "states_exact_compensation_from_record",
+      "evaluated_metrics": ["entity_id_grounding", "deterministic_grounding"]
+    },
+    {
+      "case_id": "CASE-05",
+      "category": "missing_salary_evidence",
+      "query": "What is the salary for that role?",
+      "prior_context": {
+        "active_pool": ["job_501"]
+      },
+      "retrieved_ids": ["job_501"],
+      "expected_relevant_ids": ["job_501"],
+      "expected_selected_id": "job_501",
+      "expected_facts": ["not provided", "not specified"],
+      "forbidden_facts": ["LPA", "per month", "per annum"],
+      "expected_behavior": "honest_abstention_missing_compensation",
+      "evaluated_metrics": ["entity_id_grounding", "deterministic_grounding"]
+    },
+    {
+      "case_id": "CASE-06",
+      "category": "missing_culture_evidence",
+      "query": "Tell me about the company culture of the 1st job",
+      "prior_context": {
+        "active_pool": ["job_601"]
+      },
+      "retrieved_ids": ["job_601"],
+      "expected_relevant_ids": ["job_601"],
+      "expected_selected_id": "job_601",
+      "expected_facts": ["not provided", "culture details are not available"],
+      "forbidden_facts": ["innovative work culture", "collaborative environment"],
+      "expected_behavior": "honest_abstention_missing_culture",
+      "evaluated_metrics": ["entity_id_grounding", "deterministic_grounding"]
+    },
+    {
+      "case_id": "CASE-07",
+      "category": "irrelevant_evidence_filter",
+      "query": "Urgent nurse hiring in Delhi",
+      "prior_context": null,
+      "retrieved_ids": ["job_701", "job_702", "job_703"],
+      "expected_relevant_ids": ["job_701"],
+      "expected_selected_id": null,
+      "expected_facts": ["Nurse"],
+      "forbidden_facts": ["Doctor", "Retail Cashier"],
+      "expected_behavior": "ranks_relevant_first_discounts_irrelevant",
+      "evaluated_metrics": ["context_precision", "context_recall"]
+    },
+    {
+      "case_id": "CASE-08",
+      "category": "empty_retrieval",
+      "query": "Underwater welder in Sahara Desert",
+      "prior_context": null,
+      "retrieved_ids": [],
+      "expected_relevant_ids": [],
+      "expected_selected_id": null,
+      "expected_facts": ["no matching jobs", "could not find"],
+      "forbidden_facts": [],
+      "expected_behavior": "graceful_empty_response",
+      "evaluated_metrics": ["context_precision", "context_recall"]
+    },
+    {
+      "case_id": "CASE-09",
+      "category": "out_of_range_ordinal",
+      "query": "What about the fifth job?",
+      "prior_context": {
+        "active_pool": ["job_901", "job_902", "job_903"]
+      },
+      "retrieved_ids": [],
+      "expected_relevant_ids": [],
+      "expected_selected_id": null,
+      "expected_facts": ["only 3", "out of range", "which job"],
+      "forbidden_facts": ["Job 901", "Job 902", "Job 903"],
+      "expected_behavior": "abstained_out_of_range_no_fallback",
+      "evaluated_metrics": ["entity_id_grounding", "deterministic_grounding"]
+    },
+    {
+      "case_id": "CASE-10",
+      "category": "cross_job_attribute_isolation",
+      "query": "What is the salary for Job B?",
+      "prior_context": {
+        "active_pool": ["job_1001", "job_1002"]
+      },
+      "retrieved_ids": ["job_1002"],
+      "expected_relevant_ids": ["job_1002"],
+      "expected_selected_id": "job_1002",
+      "expected_facts": ["15 LPA", "EdTech Solutions"],
+      "forbidden_facts": ["40 LPA", "FinTech Global"],
+      "expected_behavior": "strict_attribute_isolation_no_leakage",
+      "evaluated_metrics": ["entity_id_grounding", "deterministic_grounding"]
+    }
+  ]
+}

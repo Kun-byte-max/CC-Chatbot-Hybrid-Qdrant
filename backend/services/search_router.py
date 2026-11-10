@@ -38,7 +38,7 @@ async def dispatch_search_target(
     token: Optional[str] = None,
     user_slug: Optional[str] = None,
     user_profile_api_data: Optional[Dict[str, Any]] = None,
-    session_id: Optional[str] = "default_session",
+    session_id: Optional[str] = None,
     parsed_query: Optional[Dict[str, Any]] = None,
     **kwargs: Any
 ) -> Dict[str, Any]:

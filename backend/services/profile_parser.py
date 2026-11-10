@@ -109,7 +109,7 @@ async def parse_profile_update(message: str, messages: list = None) -> Dict[str,
     JSON:
     """
     try:
-        completion = await LLMService.get_chat_completion(prompt, [], timeout=12.0)
+        completion = await LLMService.get_chat_completion(prompt, [], timeout=12.0, name="profile_parser")
         cleaned_completion = completion.strip()
         if "```json" in cleaned_completion:
             cleaned_completion = cleaned_completion.split("```json")[1].split("```")[0].strip()

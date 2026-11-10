@@ -384,3 +384,283 @@ class TestPhase422ExactRecordContext:
             assert len(reply5) > 0
         finally:
             app.dependency_overrides.clear()
+
+
+class TestPhase5AOrdinalDisambiguation:
+    """Phase 1 Step 5A: Focused regression tests for employment-history option mapping disambiguation."""
+
+    @pytest.fixture
+    def three_company_data(self):
+        """Synthetic employment data with three distinct companies."""
+        history = [
+            {
+                "id": "c1",
+                "company": "Alpha Corp",
+                "is_verified": True,
+                "lists": [{"designation": "Lead Engineer", "joining_date": "2022-01-01", "worked_till_date": "2023-12-31", "still_working": "0", "salary": "2000000"}],
+                "roles": [{"designation": "Lead Engineer", "joining_date": "2022-01-01", "worked_till_date": "2023-12-31", "still_working": "0"}],
+                "salary_details": [{"designation": "Lead Engineer", "annual_ctc": "2000000"}],
+            },
+            {
+                "id": "c2",
+                "company": "Beta Systems",
+                "is_verified": True,
+                "lists": [{"designation": "Senior Developer", "joining_date": "2020-01-01", "worked_till_date": "2021-12-31", "still_working": "0", "salary": "1500000"}],
+                "roles": [{"designation": "Senior Developer", "joining_date": "2020-01-01", "worked_till_date": "2021-12-31", "still_working": "0"}],
+                "salary_details": [{"designation": "Senior Developer", "annual_ctc": "1500000"}],
+            },
+            {
+                "id": "c3",
+                "company": "Gamma Labs",
+                "is_verified": True,
+                "lists": [{"designation": "Research Scientist", "joining_date": "2018-01-01", "worked_till_date": "2019-12-31", "still_working": "0", "salary": "1200000"}],
+                "roles": [{"designation": "Research Scientist", "joining_date": "2018-01-01", "worked_till_date": "2019-12-31", "still_working": "0"}],
+                "salary_details": [{"designation": "Research Scientist", "annual_ctc": "1200000"}],
+            }
+        ]
+        return history
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_numeric_selection_continues_to_resolve(self, mock_fetch_api, three_company_data):
+        """1. '2' continues to resolve to option '2' (Beta Systems)."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2001, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2001", "Authorization": "Bearer fake_token"}
+        session_id = "sess_num_opt_2"
+
+        try:
+            # Turn 1: Trigger selection prompt
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "Show my previous employment verification status"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+            opts = r1.json()["selection_metadata"]["options"]
+            assert len(opts) == 3
+            assert opts[1]["company_name"] == "Beta Systems"
+
+            # Turn 2: User sends "2"
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "2"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            assert "Beta Systems" in reply2
+            assert "Alpha Corp" not in reply2
+        finally:
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_what_about_the_second_company_resolves(self, mock_fetch_api, three_company_data):
+        """2. 'What about the second company?' resolves to option '2' (Beta Systems)."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2002, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2002", "Authorization": "Bearer fake_token"}
+        session_id = "sess_ord_second"
+
+        try:
+            # Turn 1: Trigger selection prompt
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "Show my previous employment verification status"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+
+            # Turn 2: "What about the second company?"
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "What about the second company?"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            assert "Beta Systems" in reply2
+            assert "Alpha Corp" not in reply2
+        finally:
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_tell_me_about_the_first_one_resolves(self, mock_fetch_api, three_company_data):
+        """3. 'Tell me about the first one' resolves to option '1' (Alpha Corp)."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2003, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2003", "Authorization": "Bearer fake_token"}
+        session_id = "sess_ord_first"
+
+        try:
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "Show my previous employment verification status"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+
+            # Turn 2: "Tell me about the first one"
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "Tell me about the first one"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            assert "Alpha Corp" in reply2
+        finally:
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_what_about_the_third_company_resolves(self, mock_fetch_api, three_company_data):
+        """4. 'What about the third company?' resolves to option '3' (Gamma Labs) when option exists."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2004, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2004", "Authorization": "Bearer fake_token"}
+        session_id = "sess_ord_third"
+
+        try:
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "Show my previous employment verification status"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+
+            # Turn 2: "What about the third company?"
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "What about the third company?"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            assert "Gamma Labs" in reply2
+        finally:
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_nonexistent_ordinal_does_not_select_company(self, mock_fetch_api, three_company_data):
+        """5. An ordinal referring to a nonexistent option ('fourth') does not select another company or fallback to option '1'."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2005, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2005", "Authorization": "Bearer fake_token"}
+        session_id = "sess_ord_nonexistent"
+
+        try:
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "Show my previous employment verification status"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+
+            # Turn 2: "What about the fourth company?" (only 3 options exist)
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "What about the fourth company?"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            # Must NOT select Alpha Corp (option 1) as a silent fallback
+            from backend.utils.session_state import get_selected_employment_context
+            selected = get_selected_employment_context(session_id)
+            assert selected is None
+        finally:
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_unrelated_new_query_does_not_inherit_company_selection(self, mock_fetch_api, three_company_data):
+        """6. An unrelated new query does not inherit a company selection merely because an opt_map exists."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2006, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2006", "Authorization": "Bearer fake_token"}
+        session_id = "sess_ord_unrelated"
+
+        try:
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "Show my previous employment verification status"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+
+            # Turn 2: Unrelated query: "What is CollarCheck?"
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "What is CollarCheck?"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            # Should NOT return verification results for any of the companies
+            assert "Verification Level" not in reply2
+            from backend.utils.session_state import get_selected_employment_context
+            assert get_selected_employment_context(session_id) is None
+        finally:
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_company_name_matching_remains_unchanged(self, mock_fetch_api, three_company_data):
+        """7. Existing company-name matching remains unchanged."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2007, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2007", "Authorization": "Bearer fake_token"}
+        session_id = "sess_comp_name_match"
+
+        try:
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "Show my previous employment verification status"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+
+            # Turn 2: User mentions company name directly
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "Tell me about Alpha Corp"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            assert "Alpha Corp" in reply2
+        finally:
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_explicit_record_key_resolves(self, mock_fetch_api, three_company_data):
+        """8. Explicit record key 'emp_rec_2' resolves to Beta Systems."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2008, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2008", "Authorization": "Bearer fake_token"}
+        session_id = "sess_rec_key_2"
+
+        try:
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "Show my previous employment verification status"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+
+            # Turn 2: Explicit record key "emp_rec_2"
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "emp_rec_2"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            assert "Beta Systems" in reply2
+        finally:
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_job_search_not_intercepted_by_stale_pending_state(self, mock_fetch_api, three_company_data):
+        """9. 'Search Python developer jobs in Delhi' is not intercepted by stale pending selection state or pending_lvl."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2009, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2009", "Authorization": "Bearer fake_token"}
+        session_id = "sess_job_search_stale"
+
+        try:
+            from backend.utils.session_state import set_pending_requested_level, set_session_option_mapping
+            # Simulate stale pending state and option mapping
+            set_session_option_mapping(session_id, {"emp_rec_1": "Alpha Corp::1", "emp_rec_2": "Beta Systems::2"})
+            set_pending_requested_level(session_id, 3)
+
+            # User sends job search query
+            r = client.post("/chat", json={"messages": [{"role": "user", "content": "Search Python developer jobs in Delhi"}], "session_id": session_id}, headers=headers)
+            assert r.status_code == 200
+            data = r.json()
+            # Must NOT be intercepted as employment verification
+            assert "employment verification" not in data.get("reply", "").lower()
+            from backend.utils.session_state import get_selected_employment_context
+            assert get_selected_employment_context(session_id) is None
+        finally:
+            from backend.utils.session_state import clear_pending_requested_level
+            clear_pending_requested_level(session_id)
+            app.dependency_overrides.clear()
+
+    @patch("backend.services.user_data_service.fetch_endpoint_data")
+    def test_legitimate_pending_disambiguation_flow_with_pending_level(self, mock_fetch_api, three_company_data):
+        """10. Legitimate pending disambiguation flow still works with the project's actual pending_lvl behavior."""
+        client = TestClient(app)
+        app.dependency_overrides[verify_token] = lambda: {"uid": 2010, "email": "test@user.com", "role": "employee"}
+        mock_fetch_api.return_value = {"status": True, "data": three_company_data}
+        headers = {"X-User-Id": "2010", "Authorization": "Bearer fake_token"}
+        session_id = "sess_legit_pending_lvl"
+
+        try:
+            # Turn 1: User asks Level 3 question across ambiguous employment records
+            r1 = client.post("/chat", json={"messages": [{"role": "user", "content": "How do I complete Level 3?"}], "session_id": session_id}, headers=headers)
+            assert r1.status_code == 200
+            assert r1.json().get("selection_metadata") is not None
+            from backend.utils.session_state import get_pending_requested_level
+            assert get_pending_requested_level(session_id, role="employee", user_id=2010) == 3
+
+            # Turn 2: User responds with ordinal "second company"
+            r2 = client.post("/chat", json={"messages": [{"role": "user", "content": "What about the second company?"}], "session_id": session_id}, headers=headers)
+            assert r2.status_code == 200
+            reply2 = r2.json().get("reply", "")
+            assert "Beta Systems" in reply2
+            assert r2.json().get("requested_level") == 3
+        finally:
+            from backend.utils.session_state import clear_pending_requested_level
+            clear_pending_requested_level(session_id, role="employee", user_id=2010)
+            app.dependency_overrides.clear()

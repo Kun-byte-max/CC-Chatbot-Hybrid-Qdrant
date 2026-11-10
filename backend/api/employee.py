@@ -24,6 +24,7 @@ try:
         set_pagination_state,
         clear_pagination_state,
         set_recommendation_session,
+        get_recommendation_session,
         reset_search_context,
         handle_pagination_command,
         claim_next_pagination_page,
@@ -31,6 +32,7 @@ try:
         set_search_context,
         update_employee_session_cas,
         begin_search_generation,
+        get_conversation_context,
     )
     from backend.services.search_executor import SearchExecutor
     from backend.services.search_planner import SearchPlanner
@@ -53,6 +55,7 @@ except ModuleNotFoundError:
         set_recommendation_session,
         reset_search_context,
         handle_pagination_command,
+        get_conversation_context,
     )
     from services.search_executor import SearchExecutor  # type: ignore
     from services.search_planner import SearchPlanner  # type: ignore
@@ -106,6 +109,9 @@ class OrchestrationResult:
         global_rank: Optional[int] = None,
         job_id: Optional[Any] = None,
         suggestion_chips: Optional[List[Any]] = None,
+        search_metadata: Optional[Dict[str, Any]] = None,
+        is_terminal: bool = False,
+        reply: Optional[str] = None,
     ):
         self.role = role
         self.route_branch = route_branch
@@ -123,6 +129,9 @@ class OrchestrationResult:
         self.global_rank = global_rank
         self.job_id = job_id
         self.suggestion_chips = suggestion_chips
+        self.search_metadata = search_metadata
+        self.is_terminal = is_terminal
+        self.reply = reply
 
 
 def compose_final_response(result: OrchestrationResult) -> Dict[str, Any]:
@@ -140,6 +149,14 @@ def compose_final_response(result: OrchestrationResult) -> Dict[str, Any]:
             "status": "unavailable",
             "message": msg,
         }
+        if result.is_terminal:
+            raw_err["is_terminal"] = True
+        if result.reply is not None:
+            raw_err["reply"] = result.reply
+        elif msg:
+            raw_err["reply"] = msg
+        if result.search_metadata is not None:
+            raw_err["search_metadata"] = result.search_metadata
         return scrub_sensitive_payload_keys(raw_err, is_root=True)
 
     raw_payload = {
@@ -150,6 +167,10 @@ def compose_final_response(result: OrchestrationResult) -> Dict[str, Any]:
         "raw_hits": result.raw_hits,
         "pagination": result.pagination,
     }
+    if result.is_terminal:
+        raw_payload["is_terminal"] = True
+    if result.reply is not None:
+        raw_payload["reply"] = result.reply
     if result.explanation is not None:
         raw_payload["explanation"] = result.explanation
     if result.global_rank is not None:
@@ -158,6 +179,8 @@ def compose_final_response(result: OrchestrationResult) -> Dict[str, Any]:
         raw_payload["job_id"] = result.job_id
     if result.suggestion_chips is not None:
         raw_payload["suggestion_chips"] = result.suggestion_chips
+    if result.search_metadata is not None:
+        raw_payload["search_metadata"] = result.search_metadata
 
     return scrub_sensitive_payload_keys(raw_payload, is_root=True)
 
@@ -305,13 +328,14 @@ async def handle_employee_context(
     token: Optional[str] = None,
     user_slug: Optional[str] = None,
     user_profile_api_data: Optional[Dict[str, Any]] = None,
-    session_id: Optional[str] = "default_session",
+    session_id: Optional[str] = None,
     **kwargs: Any,
 ) -> Optional[dict]:
     """End-to-End Employee Dialogue Orchestrator.
     Routes user turn requests down modular terminal branches.
     """
     msg_lower = (last_user_msg or "").lower().strip()
+    eff_user_id = kwargs.get("user_id") or candidate_id
 
     # ------------------------------------------------------------------
     # WIDGET BRANCH 1: Position Closing Soon (Urgent Jobs)
@@ -439,47 +463,242 @@ async def handle_employee_context(
         return compose_final_response(orch_res)
 
     # ------------------------------------------------------------------
-    # WIDGET BRANCH 3: Follow-up Explanation Handler
+    # ------------------------------------------------------------------
+    # WIDGET BRANCH 3: Follow-up Explanation & Job Result Detail Handler
     # ------------------------------------------------------------------
     explanation_keywords = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
-    if re.search(r'\bwhy\b', msg_lower) and ("job" in msg_lower or "recommend" in msg_lower or "this" in msg_lower or "that" in msg_lower or "rank" in msg_lower or "#" in msg_lower or any(word in msg_lower for word in explanation_keywords)):
+    is_why_explanation = bool(re.search(r'\bwhy\b', msg_lower) and ("job" in msg_lower or "recommend" in msg_lower or "this" in msg_lower or "that" in msg_lower or "rank" in msg_lower or "#" in msg_lower or any(word in msg_lower for word in explanation_keywords)))
+
+    # Detect comparison follow-up (e.g. "compare the first and second ones")
+    from backend.recommendation.recommendation_service import parse_all_followup_ranks
+    cmp_ranks = parse_all_followup_ranks(last_user_msg)
+    is_comparison_query = bool(re.search(r'\b(?:compare|comparison|difference|versus|vs)\b', msg_lower) and len(cmp_ranks) >= 2)
+
+    # Detect follow-up question on active search results (e.g. "What about the second one?", "Tell me more about the first job", "Is that one remote?")
+    detail_patterns = [
+        r'\b(?:tell\s+me\s+more|more\s+about|details?\s+about|requirements?\s+for|what\s+about|how\s+about)\b',
+        r'\b(?:is\s+that\s+one|is\s+this\s+one|is\s+it)\b.*?\b(?:remote|wfh|hybrid|office|onsite|contract|full[\s-]*time|part[\s-]*time)\b',
+        r'\b(?:what\s+about\s+the\s+second|what\s+about\s+the\s+first|what\s+about\s+the\s+third)\b',
+    ]
+    has_detail_pattern = any(re.search(p, msg_lower) for p in detail_patterns)
+    has_ordinal = any(re.search(r'\b' + re.escape(w) + r'\b', msg_lower) for w in explanation_keywords) or bool(re.search(r'\b(?:job|rank|position|#)?\s*\d+(?:st|nd|rd|th)?\b', msg_lower))
+    has_pronoun_ref = bool(re.search(r'\b(?:that\s+one|this\s+one|the\s+job|that\s+job|this\s+job)\b', msg_lower))
+
+    # Guard: do not intercept if this is a genuine new search with a new keyword/role and search verb
+    is_explicit_new_search = bool(re.search(r'\b(?:search\s+for|find\s+jobs?|look\s+for\s+jobs?|search\s+jobs?|new\s+search)\b', msg_lower) and re.search(r'\b(?:developer|engineer|manager|accountant|analyst|designer|sales|intern|internship|jobs?|roles?)\b', msg_lower))
+
+    # Phase 6E: Integrate canonical ConversationContext facade for routing metadata
+    conv_ctx = get_conversation_context(session_id, role="employee", user_id=candidate_id) if session_id else None
+    has_active_rec_context = bool(conv_ctx and conv_ctx.has_active_job_results and conv_ctx.active_job_count > 0)
+    rec_session_snapshot = None
+
+    qr_res = kwargs.get("query_rewriter_result")
+    is_qr_job_followup = bool(qr_res and qr_res.is_followup and qr_res.target_intent in ("JOB_DETAIL", "JOB_COMPARE", "COMPANY_INFO"))
+
+    is_job_followup = (
+        not is_explicit_new_search
+        and (
+            is_qr_job_followup
+            or is_why_explanation
+            or is_comparison_query
+            or (has_active_rec_context and (has_detail_pattern or (has_ordinal and ("one" in msg_lower or "job" in msg_lower or "result" in msg_lower)) or has_pronoun_ref))
+            or (not has_active_rec_context and (has_detail_pattern and (has_ordinal or has_pronoun_ref)))
+        )
+    )
+
+    if is_job_followup:
         set_gate_flags(search_parse_ran=True)
         set_decision_flags(search_query_found=True, search_executed=True)
 
+        # Handle Comparison Follow-Up
+        if is_comparison_query:
+            rec_session_snapshot = (await run_in_threadpool(get_recommendation_session, session_id, role="employee", user_id=candidate_id)) if session_id else None
+            ranked_jobs_pool = rec_session_snapshot.get("ranked_jobs", []) if rec_session_snapshot else []
+            # Guard against metadata indicating active results when actual pool is empty
+            if not has_active_rec_context or not ranked_jobs_pool:
+                err_msg = "I don't have a recent job recommendation list to refer to."
+                db_context_str = f"## RECOMMENDATION COMPARISON ERROR\n{err_msg}\n\n[INSTRUCTION]\nRespond with: {err_msg}"
+                orch_res = OrchestrationResult(
+                    role="employee",
+                    route_branch="COMPARISON_ERROR",
+                    success=True,
+                    db_context=db_context_str,
+                    result_type="job_comparison_error",
+                )
+                return compose_final_response(orch_res)
+
+            # Multi-job comparison resolution (Phase D)
+            if qr_res and qr_res.target_intent == "JOB_COMPARE" and qr_res.entity_refs:
+                qr_ranks = [r.target_ordinal for r in qr_res.entity_refs if r.target_ordinal is not None]
+                if qr_ranks:
+                    cmp_ranks = qr_ranks
+
+            total_pool = len(ranked_jobs_pool)
+
+            # Cap comparison to max 5 targets to maintain LLM context quality
+            MAX_COMPARE_TARGETS = 5
+            target_ranks = cmp_ranks[:MAX_COMPARE_TARGETS]
+            truncated_ranks = cmp_ranks[MAX_COMPARE_TARGETS:]
+
+            comparison_records = []
+            allowed_compare_ids = set()
+            for r_idx in target_ranks:
+                if 1 <= r_idx <= total_pool:
+                    job_obj = ranked_jobs_pool[r_idx - 1]
+                    comparison_records.append((r_idx, job_obj))
+                    j_id = getattr(job_obj, "job_id", None) or (job_obj.get("id") if isinstance(job_obj, dict) else None)
+                    if j_id is not None:
+                        allowed_compare_ids.add(j_id)
+
+            if len(comparison_records) < len(target_ranks) or len(comparison_records) < 2:
+                err_msg = f"Cannot compare jobs because one or more requested ranks are out of bounds (Available: 1–{total_pool})."
+                db_context_str = f"## RECOMMENDATION COMPARISON ERROR\n{err_msg}\n\n[INSTRUCTION]\nRespond with: {err_msg}"
+                orch_res = OrchestrationResult(
+                    role="employee",
+                    route_branch="COMPARISON_ERROR",
+                    success=True,
+                    db_context=db_context_str,
+                    result_type="job_comparison_error",
+                )
+                return compose_final_response(orch_res)
+
+            comp_lines = ["## JOB COMPARISON CONTEXT\nComparing the requested jobs from your preceding search:\n"]
+            if truncated_ranks:
+                comp_lines.append(f"Note: Comparison is limited to the first {MAX_COMPARE_TARGETS} requested jobs. Ranks {truncated_ranks} were excluded.\n")
+
+            for r_num, r_obj in comparison_records:
+                raw_d = getattr(r_obj, "raw_data", {}) if hasattr(r_obj, "raw_data") else (r_obj if isinstance(r_obj, dict) else {})
+                t = raw_d.get("job_title") or getattr(r_obj, "title", "Job")
+                c = raw_d.get("company_name") or "CollarCheck Partner"
+                m = raw_d.get("job_mode_name") or "Work from Office"
+                l = _extract_location(raw_d)
+                s = _format_salary(raw_d.get("salary"))
+                desc = raw_d.get("job_description") or ""
+                reqs = raw_d.get("requirements") or ""
+                comp_lines.append(
+                    f"### Job #{r_num}: {t} at {c}\n"
+                    f"- Company: {c}\n"
+                    f"- Location: {l}\n"
+                    f"- Work Mode: {m}\n"
+                    f"- Salary: {s or 'Not specified'}\n"
+                    f"- Requirements: {reqs or 'Not specified'}\n"
+                    f"- Description: {_clean_description(desc) or 'Not specified'}\n"
+                )
+            comp_lines.append(f"\n[INSTRUCTION]\nCompare the {len(comparison_records)} jobs clearly in a structured, side-by-side format based strictly on the verified details provided above. Do not assume or invent unlisted benefits or salaries.")
+            db_context_str = "\n".join(comp_lines)
+
+            orch_res = OrchestrationResult(
+                role="employee",
+                route_branch="JOB_COMPARISON",
+                success=True,
+                db_context=db_context_str,
+                result_type="job_comparison",
+                allowed_ids=allowed_compare_ids,
+            )
+            return compose_final_response(orch_res)
+
+        # Handle Single Job Follow-Up / Detail / Explanation
+        is_company_info = False
+        if qr_res and getattr(qr_res, "target_intent", None) == "COMPANY_INFO":
+            is_company_info = True
+        elif re.search(r'\b(?:about\s+(?:the\s+)?company|company\s+details|who\s+is\s+(?:the\s+)?(?:employer|company)|tell\s+me\s+about\s+(?:the\s+)?company|culture)\b', msg_lower):
+            is_company_info = True
+
+        # If user asks why, or asks about company/culture, or single job in session, allow unambiguous fallback
+        allow_single_fallback = is_why_explanation or is_company_info or bool(qr_res and qr_res.is_followup)
         res_exp = recommendation_service.get_recommendation_by_rank_or_id(
             session_id=session_id,
-            user_message=last_user_msg
+            user_message=last_user_msg,
+            allow_ambiguous_fallback=allow_single_fallback,
+            role="employee",
+            user_id=eff_user_id,
         )
         if res_exp.get("success"):
+            rec_obj = res_exp.get("recommendation")
             summary_txt = res_exp.get("recommendation_explanation", "")
             g_rank = res_exp.get("global_rank", 1)
             j_id = res_exp.get("job_id")
 
-            if JOB_MATCH_ENABLED and candidate_id and j_id and str(candidate_id).isdigit() and str(j_id).isdigit():
-                try:
-                    prev_data = await job_match_client.match_preview(candidate_id=int(candidate_id), job_id=int(j_id))
-                    if isinstance(prev_data, dict):
-                        score_val = round(float(prev_data.get("final_score", 0.0)) * 100.0)
-                        reasons_list = prev_data.get("reasons", [])
-                        if reasons_list:
-                            summary_txt = f"Match Score: {score_val}% • " + " • ".join(str(r) for r in reasons_list)
-                        else:
-                            summary_txt = f"Match Score: {score_val}%"
-                except Exception as prev_ex:
-                    log.info("[JobMatch] match_preview unavailable (%s), using session explanation fallback.", prev_ex)
+            if isinstance(rec_obj, dict) and "raw_data" in rec_obj and isinstance(rec_obj["raw_data"], dict):
+                raw_job_dict = rec_obj["raw_data"]
+            else:
+                raw_job_dict = getattr(rec_obj, "raw_data", {}) if hasattr(rec_obj, "raw_data") else (rec_obj if isinstance(rec_obj, dict) else {})
+            job_title = raw_job_dict.get("job_title") or getattr(rec_obj, "title", "Job Title")
+            company_name = raw_job_dict.get("company_name") or "CollarCheck Partner"
+            location_str = _extract_location(raw_job_dict)
+            work_mode_str = raw_job_dict.get("job_mode_name") or "Work from Office"
+            salary_str = _format_salary(raw_job_dict.get("salary"))
+            job_desc_str = raw_job_dict.get("job_description")
+            requirements_str = raw_job_dict.get("requirements")
 
-            db_context_str = (
-                f"## JOB RECOMMENDATION EXPLANATION\n"
-                f"Explanation for global rank #{g_rank} (Job ID {j_id}): {summary_txt}\n\n"
-                "[INSTRUCTION]\n"
-                f"Explain clearly to the user why job #{g_rank} was recommended: {summary_txt}"
-            )
+            if is_why_explanation:
+                if JOB_MATCH_ENABLED and candidate_id and j_id and str(candidate_id).isdigit() and str(j_id).isdigit():
+                    try:
+                        prev_data = await job_match_client.match_preview(candidate_id=int(candidate_id), job_id=int(j_id))
+                        if isinstance(prev_data, dict):
+                            score_val = round(float(prev_data.get("final_score", 0.0)) * 100.0)
+                            reasons_list = prev_data.get("reasons", [])
+                            if reasons_list:
+                                summary_txt = f"Match Score: {score_val}% • " + " • ".join(str(r) for r in reasons_list)
+                            else:
+                                summary_txt = f"Match Score: {score_val}%"
+                    except Exception as prev_ex:
+                        log.info("[JobMatch] match_preview unavailable (%s), using session explanation fallback.", prev_ex)
+
+                db_context_str = (
+                    f"## JOB RECOMMENDATION EXPLANATION\n"
+                    f"Explanation for global rank #{g_rank} (Job ID {j_id}): {summary_txt}\n\n"
+                    "[INSTRUCTION]\n"
+                    f"Explain clearly to the user why job #{g_rank} was recommended: {summary_txt}"
+                )
+                res_type = "recommendation_explanation"
+                route_branch = "EXPLANATION"
+            elif is_company_info:
+                company_desc = raw_job_dict.get("company_description") or raw_job_dict.get("about_company")
+                company_culture = raw_job_dict.get("company_culture") or raw_job_dict.get("culture")
+                db_context_str = (
+                    f"## SELECTED COMPANY DETAILS\n"
+                    f"The user is asking about the company for Job #{g_rank} from their search results:\n"
+                    f"- Company Name: {company_name}\n"
+                    f"- Associated Role: {job_title}\n"
+                    f"- Location: {location_str}\n"
+                    f"- Overview / About Company: {_clean_description(company_desc) if company_desc else 'Not provided in indexed record'}\n"
+                    f"- Culture / Workplace: {company_culture if company_culture else 'Not provided in indexed record'}\n\n"
+                    "[MANDATORY AI INSTRUCTION]\n"
+                    f"Answer the user's question regarding '{company_name}' strictly using the verified company evidence above. "
+                    "If details regarding culture, workplace, or company background are marked as 'Not provided in indexed record', "
+                    "state clearly that this information is not available in the platform's indexed listing. "
+                    "Under NO circumstances should you fabricate, assume, or invent company culture, benefits, or background from the company name or role."
+                )
+                res_type = "company_info"
+                route_branch = "COMPANY_INFO"
+            else:
+                sal_disp = salary_str if salary_str else "Not specified in listing"
+                req_disp = requirements_str if requirements_str else "Not specified in listing"
+                desc_disp = _clean_description(job_desc_str) if job_desc_str else "Not specified in listing"
+                db_context_str = (
+                    f"## SELECTED JOB RESULT DETAILS\n"
+                    f"The user is asking about Job #{g_rank} from their preceding search results:\n"
+                    f"- Title: {job_title}\n"
+                    f"- Company: {company_name}\n"
+                    f"- Location: {location_str}\n"
+                    f"- Work Mode: {work_mode_str}\n"
+                    f"- Salary: {sal_disp}\n"
+                    f"- Requirements: {req_disp}\n"
+                    f"- Description: {desc_disp}\n\n"
+                    "[INSTRUCTION]\n"
+                    f"Answer the user's specific question regarding Job #{g_rank} ({job_title} at {company_name}) accurately using strictly the details above. "
+                    "If salary, requirements, or other attributes are 'Not specified in listing', state honestly that this information was not provided in the job listing rather than speculating or inventing figures."
+                )
+                res_type = "job_detail"
+                route_branch = "JOB_DETAIL"
+
             orch_res = OrchestrationResult(
                 role="employee",
-                route_branch="EXPLANATION",
+                route_branch=route_branch,
                 success=True,
                 db_context=db_context_str,
-                result_type="recommendation_explanation",
+                result_type=res_type,
                 explanation=summary_txt,
                 global_rank=g_rank,
                 job_id=j_id,
@@ -487,13 +706,16 @@ async def handle_employee_context(
             return compose_final_response(orch_res)
         else:
             err_msg = res_exp.get("error", "I couldn't find a matching recommendation snapshot in your current session.")
-            db_context_str = f"## RECOMMENDATION EXPLANATION ERROR\n{err_msg}\n\n[INSTRUCTION]\nRespond with: {err_msg}"
+            db_context_str = f"## RECOMMENDATION SNAPSHOT ERROR\n{err_msg}\n\n[INSTRUCTION]\nRespond with: {err_msg}"
+            res_type = "recommendation_explanation_error" if is_why_explanation else "job_detail_error"
             orch_res = OrchestrationResult(
                 role="employee",
-                route_branch="EXPLANATION_ERROR",
+                route_branch="EXPLANATION_ERROR" if is_why_explanation else "JOB_DETAIL_ERROR",
                 success=True,
                 db_context=db_context_str,
-                result_type="recommendation_explanation_error",
+                result_type=res_type,
+                is_terminal=True,
+                reply=err_msg,
             )
             return compose_final_response(orch_res)
 
@@ -502,7 +724,7 @@ async def handle_employee_context(
     # ------------------------------------------------------------------
     is_pagination_cmd = False
     requested_page = 1
-    saved_p_state = get_pagination_state(session_id, role="employee")
+    saved_p_state = await run_in_threadpool(get_pagination_state, session_id, role="employee", user_id=eff_user_id)
     page_num_match = re.search(r'\b(?:go\s+to\s+|show\s+)?page\s+(\d+)\b', msg_lower)
     if page_num_match:
         is_pagination_cmd = True
@@ -539,7 +761,8 @@ async def handle_employee_context(
             handle_pagination_command(
                 session_id=session_id,
                 command=cmd_str,
-                role="employee"
+                role="employee",
+                user_id=eff_user_id,
             )
 
         res_type = saved_p_state.get("result_type", "jobs")
@@ -570,7 +793,7 @@ async def handle_employee_context(
                 "all_recs": all_recs,
                 "search_gen": saved_p_state.get("search_gen", 1),
             }
-            set_pagination_state(session_id, pag_meta, role="employee")
+            await run_in_threadpool(set_pagination_state, session_id, pag_meta, role="employee", user_id=eff_user_id)
 
             if is_oob:
                 db_context_str = f"## CANDIDATE PAGINATION\nRequested page {requested_page} is out of bounds (Total pages: {total_pages}).\n\n[INSTRUCTION]\nInform the user page {requested_page} is not available (valid pages 1–{total_pages})."
@@ -655,7 +878,7 @@ async def handle_employee_context(
                 "all_recs": all_recs,
                 "search_gen": saved_p_state.get("search_gen", 1),
             }
-            set_pagination_state(session_id, pag_meta, role="employee")
+            await run_in_threadpool(set_pagination_state, session_id, pag_meta, role="employee", user_id=eff_user_id)
 
             if is_oob:
                 db_context_str = f"## PAGINATION\nRequested page {requested_page} is out of bounds (Total pages: {total_pages}).\n\n[INSTRUCTION]\nInform the user page {requested_page} is not available (valid pages 1–{total_pages})."
@@ -687,7 +910,7 @@ async def handle_employee_context(
         set_gate_flags(search_parse_ran=True)
         set_decision_flags(search_query_found=True, search_executed=True)
 
-        reset_search_context(session_id, role="employee")
+        await run_in_threadpool(reset_search_context, session_id, role="employee", user_id=eff_user_id)
         db_context_str = "## SEARCH CONTEXT RESET\nYour job search context has been cleared.\n\n[INSTRUCTION]\nInform the user in one sentence that their search context has been reset and ask what role or location they want to search for."
         orch_res = OrchestrationResult(
             role="employee",
@@ -727,8 +950,8 @@ async def handle_employee_context(
     except ModuleNotFoundError:
         from utils.session_state import get_candidate_search_criteria  # type: ignore
 
-    has_cand_ctx = bool(get_candidate_search_criteria(session_id, role="employee")) if session_id else False
-    has_active_ctx = (bool(get_search_context(session_id, role="employee")) or has_cand_ctx) if session_id else False
+    has_cand_ctx = bool(await run_in_threadpool(get_candidate_search_criteria, session_id, role="employee", user_id=eff_user_id)) if session_id else False
+    has_active_ctx = (bool(await run_in_threadpool(get_search_context, session_id, role="employee", user_id=eff_user_id)) or has_cand_ctx) if session_id else False
     is_search = bool(parsed.get("is_search_intent")) or bool(parsed.get("is_recommendation_intent")) or bool(parsed.get("use_profile_skills")) or bool(parsed.get("candidate_name")) or bool(parsed.get("job_mode")) or bool(parsed.get("location")) or bool(parsed.get("salary")) or (parsed.get("experience_min") is not None) or (parsed.get("experience_max") is not None) or (parsed.get("search_target") in ("JOBS", "PEOPLE_SEARCH", "CANDIDATE_SEARCH")) or (has_active_ctx and bool(parsed.get("clear_filters")))
     
     is_knowledge = bool(parsed.get("is_knowledge_intent"))
@@ -780,7 +1003,7 @@ async def handle_employee_context(
         from utils.session_state import get_candidate_search_criteria  # type: ignore
 
     target_val = parsed.get("search_target")
-    has_cand_ctx = bool(get_candidate_search_criteria(session_id, role="employee")) if session_id else False
+    has_cand_ctx = bool(await run_in_threadpool(get_candidate_search_criteria, session_id, role="employee", user_id=eff_user_id)) if session_id else False
 
     # Detect explicit job topic switch (e.g. "Find Python jobs", "developer vacancies", "openings", "jobs with urgent hiring")
     msg_lower = (last_user_msg or "").lower()
@@ -805,7 +1028,7 @@ async def handle_employee_context(
         # Candidate search multi-turn state classification:
         # NEW_SEARCH if new non-overlapping candidate skills are requested with candidate terms.
         # REFINEMENT for all follow-up refinements when candidate context is active and no job switch requested.
-        prev_cand_ctx = get_candidate_search_criteria(session_id, role="employee") if session_id else None
+        prev_cand_ctx = (await run_in_threadpool(get_candidate_search_criteria, session_id, role="employee", user_id=eff_user_id)) if session_id else None
         if prev_cand_ctx and has_cand_term and parsed.get("skills"):
             prev_skills_l = [str(s).lower() for s in (prev_cand_ctx.skills or []) if s]
             curr_skills_l = [str(s).lower() for s in (parsed.get("skills") or []) if s]
@@ -837,29 +1060,46 @@ async def handle_employee_context(
         query_type = parsed.get("query_type", "NEW_SEARCH")
 
         # Multi-turn candidate search context retrieval & refinement merge
-        prev_criteria = get_candidate_search_criteria(session_id, role="employee") if session_id else None
+        prev_criteria = (await run_in_threadpool(get_candidate_search_criteria, session_id, role="employee", user_id=eff_user_id)) if session_id else None
         if query_type == "REFINEMENT" and prev_criteria:
-            log.info(f"[SESSION_TRACE] candidate_search_state=refined session_id={session_id}")
+            log.info("[SESSION_TRACE] candidate_search_state=refined")
             criteria = merge_candidate_search_criteria(prev_criteria, current_criteria, query_type=query_type, parsed_dict=parsed)
         else:
-            log.info(f"[SESSION_TRACE] candidate_search_state=created session_id={session_id}")
+            log.info("[SESSION_TRACE] candidate_search_state=created")
             criteria = current_criteria
 
         if session_id:
-            set_candidate_search_criteria(session_id, criteria, role="employee")
+            await run_in_threadpool(set_candidate_search_criteria, session_id, criteria, role="employee", user_id=eff_user_id)
 
-        cur_search_gen = begin_search_generation(session_id, role="employee") if session_id else 1
+        cur_search_gen = (await run_in_threadpool(begin_search_generation, session_id, role="employee", user_id=eff_user_id)) if session_id else 1
         cur_u_id = int(candidate_id) if candidate_id and str(candidate_id).isdigit() else None
-        res_people = PeopleSearchService.search_people(
-            criteria=criteria,
-            current_user_id=cur_u_id,
-            user_location=user_location,
-        )
+        try:
+            res_people = PeopleSearchService.search_people(
+                criteria=criteria,
+                current_user_id=cur_u_id,
+                user_location=user_location,
+            )
+        except Exception as p_ex:
+            log.exception("People search execution failed: %s", p_ex)
+            try:
+                from backend.utils.timing import set_retrieval_metadata
+                people_fail_meta = {
+                    "search_mode": "PEOPLE_SEARCH",
+                    "search_provider": "people_repo",
+                    "provider_status": "unavailable",
+                    "people_search_outcome": "provider_failure",
+                    "retrieval_attempted": True,
+                    "retrieval_error_type": type(p_ex).__name__,
+                }
+                set_retrieval_metadata(people_fail_meta)
+            except Exception as t_ex:
+                log.debug("Telemetry failure during People Search exception recording: %s", t_ex)
+            raise
 
         pag_info = res_people.get("pagination")
         if pag_info and session_id:
             pag_info["search_gen"] = cur_search_gen
-            set_pagination_state(session_id, pag_info, role="employee")
+            await run_in_threadpool(set_pagination_state, session_id, pag_info, role="employee", user_id=eff_user_id)
 
         orch_res = OrchestrationResult(
             role="employee",
@@ -871,6 +1111,7 @@ async def handle_employee_context(
             pagination=pag_info,
             raw_hits=res_people.get("raw_hits", []),
             suggestion_chips=res_people.get("suggestion_chips"),
+            search_metadata=res_people.get("search_metadata"),
         )
         return compose_final_response(orch_res)
 
@@ -891,7 +1132,7 @@ async def handle_employee_context(
 
     msg_l = last_user_msg.lower()
     new_kw = (parsed.get("keyword") or "").lower()
-    active_ctx = get_search_context(session_id, role="employee") if session_id else None
+    active_ctx = (await run_in_threadpool(get_search_context, session_id, role="employee", user_id=eff_user_id)) if session_id else None
     existing_title = (active_ctx.get("title") or "").lower() if active_ctx else ""
 
     # Determine whether new_kw is a title refinement (e.g. 'python' -> 'senior python developer') vs completely new domain search ('accountant')
@@ -912,10 +1153,10 @@ async def handle_employee_context(
         prompt_cat = "OVERRIDE"
     else:
         prompt_cat = "ADDITIVE"
-    cur_job_search_gen = begin_search_generation(session_id, role="employee") if session_id else 1
+    cur_job_search_gen = (await run_in_threadpool(begin_search_generation, session_id, role="employee", user_id=eff_user_id)) if session_id else 1
     if session_id:
         try:
-            active_state = update_employee_session_cas(session_id, turn_sq, prompt_category=prompt_cat, role="employee")
+            active_state = await run_in_threadpool(update_employee_session_cas, session_id, turn_sq, prompt_category=prompt_cat, role="employee", user_id=eff_user_id)
             raw_merged_ctx = active_state.get("search_context") if isinstance(active_state, dict) else None
             ctx_dict = {}
             if raw_merged_ctx:
@@ -1203,6 +1444,7 @@ async def handle_employee_context(
         # Hybrid Search Layer Integration Branch
         hybrid_executed = False
         used_job_match_flag = False
+        hybrid_meta = None
         if HYBRID_SEARCH_ENABLED and not has_explicit_unresolved_location and not current_loc_missing:
             try:
                 hits, hybrid_meta = await execute_hybrid_job_search(
@@ -1225,6 +1467,7 @@ async def handle_employee_context(
                 log.warning("[HybridSearch] Hybrid search execution failed (%s). Falling back to legacy pipeline.", h_err)
                 hybrid_executed = False
 
+        retrieval_failed = False
         if not hybrid_executed and not used_job_match_flag:
             # Retrieval Phase
             hits = []
@@ -1264,26 +1507,54 @@ async def handle_employee_context(
                                 if j_id is not None and j_id not in seen_ids:
                                     seen_ids.add(j_id)
                                     merged_hits.append(item)
+                        elif isinstance(r, dict) and r.get("success") is False:
+                            retrieval_failed = True
                     hits = merged_hits
                 if not hits and not explicit_loc:
                     res_all = await search_jobs(**base_filters)
-                    hits = res_all.get("data", []) if isinstance(res_all, dict) else []
+                    if isinstance(res_all, dict):
+                        if res_all.get("success") is False:
+                            retrieval_failed = True
+                        hits = res_all.get("data", [])
+                    else:
+                        hits = []
             else:
                 filters = dict(base_filters)
                 if keyword:
                     filters["keyword"] = keyword
                 res_jobs = await search_jobs(**filters)
-                hits = res_jobs.get("data", []) if isinstance(res_jobs, dict) else []
+                if isinstance(res_jobs, dict):
+                    if res_jobs.get("success") is False:
+                        retrieval_failed = True
+                    hits = res_jobs.get("data", [])
+                else:
+                    hits = []
 
-            # MySQL SearchExecutor fallback if 0 hits
-            if not hits and not explicit_loc and not base_filters.get("city") and not base_filters.get("state"):
+            # MySQL SearchExecutor fallback if 0 hits and retrieval did not encounter network/service failure
+            if not hits and not retrieval_failed and not explicit_loc and not base_filters.get("city") and not base_filters.get("state"):
                 sq = SearchQuery(title=keyword, work_mode=parsed.get("job_mode"))
                 executor_hits = SearchExecutor.execute_search(sq)
                 if executor_hits:
                     hits = executor_hits
 
-            # Handle 0 hits case
+            # Handle retrieval failure vs valid 0 hits case
             if not hits:
+                if retrieval_failed:
+                    log.warning("[EmployeeOrchestrator] Job search service unavailable or timed out.")
+                    outage_msg = "Our job search service is temporarily experiencing connectivity issues. Please try again in a moment."
+                    orch_res = OrchestrationResult(
+                        role="employee",
+                        route_branch="SERVICE_UNAVAILABLE",
+                        success=False,
+                        status="UNAVAILABLE",
+                        message=outage_msg,
+                        reply=outage_msg,
+                        is_terminal=True,
+                        section="search",
+                        search_metadata=hybrid_meta if hybrid_executed else None,
+                    )
+                    return compose_final_response(orch_res)
+
                 try:
                     from backend.services.chip_generator import generate_suggestion_chips
                 except ImportError:
@@ -1312,6 +1583,7 @@ async def handle_employee_context(
                     success=True,
                     db_context=no_hits_msg,
                     suggestion_chips=fallback_chips,
+                    search_metadata=hybrid_meta if hybrid_executed else None,
                 )
                 return compose_final_response(orch_res)
 
@@ -1344,7 +1616,7 @@ async def handle_employee_context(
         pagination_meta["all_recs"] = all_recs
         pagination_meta["search_gen"] = cur_job_search_gen
         pagination_meta["_is_fresh_init"] = True
-        set_pagination_state(session_id, pagination_meta, role="employee")
+        set_pagination_state(session_id, pagination_meta, role="employee", user_id=eff_user_id)
 
         try:
             from backend.schemas.schemas import JobCard
@@ -1402,13 +1674,17 @@ async def handle_employee_context(
         pagination_meta["ranked_jobs"] = [card.model_dump() if hasattr(card, "model_dump") else card.dict() for card in job_cards]
 
         # Set recommendation session snapshot in Phase 5 store
-        set_recommendation_session(
+        await run_in_threadpool(
+            set_recommendation_session,
             session_id=session_id,
             query_key=f"cand_{candidate_prof.id if (candidate_prof and hasattr(candidate_prof, 'id')) else 'default'}",
             ranked_jobs=target_recs,
             current_page=1,
             page_size=MAX_RESULTS,
-            total_jobs=len(all_recs)
+            total_jobs=len(all_recs),
+            role="employee",
+            user_id=eff_user_id,
+            search_gen=cur_job_search_gen,
         )
 
         display_total = pagination_meta.get("total_results", len(job_cards))
@@ -1451,6 +1727,7 @@ async def handle_employee_context(
             raw_hits=valid_hits[:MAX_RESULTS],
             pagination=pagination_meta,
             suggestion_chips=generated_chips,
+            search_metadata=hybrid_meta if hybrid_executed else None,
         )
         return compose_final_response(orch_res)
 

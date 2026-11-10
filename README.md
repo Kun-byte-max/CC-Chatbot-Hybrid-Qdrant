@@ -6,51 +6,91 @@ Welcome to the **CollarCheck Chatbot & Search Engine** backend documentation. Th
 
 ## 🏗️ System Architecture Overview
 
-```
-                      +----------------------------------+
-                      |       Web Frontend (HTML/JS)     |
-                      +----------------------------------+
-                                       |
-                                HTTP / REST (JWT)
-                                       v
-                      +----------------------------------+
-                      |     FastAPI Server (api.py)      |
-                      |      & Backend (main.py)         |
-                      +----------------------------------+
-                         /             |              \
-                        /              |               \
-                       v               v                v
-          +------------------+  +--------------+  +------------------+
-          | Meilisearch Engine|  |  MySQL / DB  |  | OpenAI GPT Model |
-          | (Search / RAG)   |  | (Relational) |  | (LLM Reasoning)  |
-          +------------------+  +--------------+  +------------------+
-```
+The CollarCheck AI Chatbot & Search Engine is engineered as an enterprise-grade, asynchronous, event-driven retrieval-augmented generation (RAG) platform. It provides high-speed hybrid candidate/job discovery, multi-turn stateful conversational interactions, employment verification roadmaps, and deterministic entity grounding.
 
-The system combines a **FastAPI backend**, a **Meilisearch search engine** (for high-speed candidate, job, and company indexing), a **MySQL/SQLite database** (for relational persistent user data), and an **OpenAI LLM pipeline** (for natural language query parsing, intent detection, profile context synthesis, and conversational response generation).
+### 📊 System Architecture Flowchart
 
-### 🔄 Advanced Hybrid Search & Multi-Turn State Architecture
+```mermaid
+flowchart TD
+    subgraph ClientLayer["🖥️ Presentation & Client Layer"]
+        UI["Web Frontend (HTML5 / JS Client)"]
+        SSE_Client["SSE EventSource Client\n(Streaming Parser & Heartbeat Consumer)"]
+        UI_Components["Action Chips | Verification Playcards | Roadmaps"]
+    end
 
-```
-                      +------------------------------------------+
-                      |          Web Frontend (HTML/JS)          |
-                      |    (Action Controls, Playcards, Roadmap) |
-                      +------------------------------------------+
-                                           |
-                                    HTTP / REST (JWT)
-                                           v
-                      +------------------------------------------+
-                      |         FastAPI Unified Gateway          |
-                      |       (api.py -> backend.main:app)       |
-                      +------------------------------------------+
-                        /          |             \             \
-                       /           |              \             \
-                      v            v               v             v
-       +--------------------+ +-------------+ +-----------+ +---------------+
-       | Hybrid Searcher    | | CAS Session | | MySQL DB  | | OpenAI / Groq |
-       | (Meilisearch BM25  | | Concurrency | | (Users &  | | (LLM Reasoner |
-       |  + Job Match API   | | State Store | |  Tenures) | |  & Intent)    |
-       |  via RRF k=60)     | | (Optimistic)| |           | |               |
-       +--------------------+ +-------------+ +-----------+ +---------------+
+    subgraph GatewayLayer["🚪 API Gateway & Ingress Layer (FastAPI)"]
+        App["FastAPI Unified Gateway\n(api.py ➔ backend.main:app)"]
+        CORS["CORS Middleware"]
+        Auth["JWT Auth Interceptor\n(verify_token Dependency)"]
+        Telemetry["Request Telemetry & Stage Timers\n(req_id, TTFT, Token Tracking)"]
+    end
+
+    subgraph LifecycleLayer["⚡ Lifespan & Connection Pooling Layer"]
+        Lifespan["FastAPI Lifespan Manager"]
+        DB_Pool["aiomysql Pool\n(minsize=2, maxsize=10)"]
+        Search_Pool["httpx.AsyncClient\n(Search Pool: max=50, keepalive=20)"]
+        JobMatch_Pool["httpx.AsyncClient\n(JobMatch Pool: max=50, keepalive=20)"]
+        LLM_Pool["httpx.AsyncClient (Loop-Aware LLM Pool)\n(Loop Affinity Check & Fallback)"]
+        Sync_Workers["Async Sync Workers\n(_partial_sync_loop & _full_sync_loop)"]
+    end
+
+    subgraph LogicLayer["🧠 AI Orchestration & Business Logic (execute_chat_pipeline)"]
+        Guardrails["Safety Guardrails\n(Regex Intent & Out-of-Scope Filter)"]
+        IntentParser["User Data Intent Parser\n(Profile Updates & Verification Triggers)"]
+        SessionCAS["Multi-Turn Session State Store\n(Atomic CAS Optimistic Locking)"]
+        QueryRewriter["Query Rewriter & Taxonomy Resolver\n(Token, Location & Dynamic Skills Map)"]
+        HybridEngine["Hybrid Retrieval Engine\n(Meilisearch BM25 + Job Match Neural API)"]
+        RRF["Reciprocal Rank Fusion (RRF)\n(k=60 | Meili: 0.70, JobMatch: 0.30)"]
+        PromptAssembler["Context & System Prompt Assembler\n(15-min TTL Cache + Profile Block)"]
+        LLM["LLM Service\n(OpenAI GPT-4o / Groq LLaMA)"]
+        GroundingValidator["Hallucination & Entity Grounding Audit\n(allowed_ids Check & Attribute Verifier)"]
+        SSE_Engine["SSE Streaming Engine\n(await_with_keepalive & is_disconnected)"]
+    end
+
+    subgraph StorageLayer["💾 Storage & Remote Microservices"]
+        MySQL[("MySQL Relational DB\n(14+ Tables: cyb_user, cyb_company_job, etc.)")]
+        Meili[("Meilisearch Search Engine\n(Inverted Index, BM25, Typo Tolerant)")]
+        JobMatchAPI["Remote CollarCheck Job Match API\n(Neural / Semantic Embeddings)"]
+        OpenAI["Upstream LLM Provider\n(OpenAI API / Groq API)"]
+    end
+
+    %% Client to Gateway
+    UI -->|HTTP POST /chat| App
+    SSE_Client -->|HTTP POST /chat/stream| App
+    App --> CORS --> Auth --> Telemetry
+
+    %% Lifespan Connections
+    Lifespan --> DB_Pool & Search_Pool & JobMatch_Pool & LLM_Pool & Sync_Workers
+    Sync_Workers -.->|Periodic Incremental & Full Sync| MySQL
+    Sync_Workers -.->|Batch Indexing Updates| Meili
+
+    %% Request Pipeline Flow
+    Telemetry --> Guardrails
+    Guardrails -->|Valid Query| IntentParser
+    Guardrails -->|Blocked / Smalltalk| UI
+    IntentParser -->|Profile Update Intent| MySQL
+    IntentParser --> SessionCAS
+    SessionCAS --> QueryRewriter
+
+    %% Retrieval Subsystem
+    QueryRewriter --> HybridEngine
+    HybridEngine -->|Lexical Query| Search_Pool --> Meili
+    HybridEngine -->|Semantic Query| JobMatch_Pool --> JobMatchAPI
+    Meili -.-> RRF
+    JobMatchAPI -.-> RRF
+    RRF --> PromptAssembler
+
+    %% Prompt Assembly & LLM Generation
+    MySQL -.->|15-min TTL Cached User Data| PromptAssembler
+    PromptAssembler --> LLM_Pool --> OpenAI
+    OpenAI --> LLM
+
+    %% Verification & Delivery
+    LLM --> GroundingValidator
+    GroundingValidator -->|Purge Hallucinated IDs| UI_Components
+    LLM --> SSE_Engine
+    SSE_Engine -->|event: delta / keepalive| SSE_Client
+    UI_Components -->|ChatResponse JSON| UI
 ```
 
 ---
@@ -174,27 +214,189 @@ GROUP BY u.id;
 
 ## 🤖 AI Execution Flow & Data Pipeline
 
-```
-[User Message] ──> [Guardrails Check] ──> [Profile Update Intent Parser]
-                                                     │
-[Meilisearch / DB RAG] <── [Profile Context Loader] <┘ (Reads 15-min TTL Cache)
-          │
-          v
-[System Prompt Assembly] ──> [OpenAI GPT Completion] ──> [ID Security Audit] ──> [JSON Response to UI]
+The chatbot engine executes a high-throughput, multi-stage processing pipeline across every request. It supports both **buffered JSON responses** (`POST /chat`) and **real-time Server-Sent Events (SSE)** (`POST /chat/stream`) with zero-downtime graceful fallbacks and client disconnection management.
+
+### 🔀 Chatbot Data Flow & Execution Pipeline Flowchart
+
+```mermaid
+flowchart TD
+    Start(["💬 User Types Message in Web UI"]) --> Ingress["FastAPI Router\n(POST /chat or /chat/stream)"]
+    Ingress --> AuthCheck{"🔐 JWT Bearer Auth\n(verify_token)"}
+    
+    AuthCheck -->|❌ Missing or Invalid| Auth401["HTTP 401 Unauthorized\n(Return error JSON)"]
+    AuthCheck -->|✅ Valid Token| Telemetry["⏱️ Telemetry & Timing\n(Generate req_id, start stage_timer)"]
+    
+    Telemetry --> GuardrailsCheck{"🛡️ Guardrails Check\n(Regex Intent & Safety)"}
+    GuardrailsCheck -->|🚫 Out of Scope / Malicious| GuardrailsTerminal["Terminal Deflection\n(Return friendly safe reply)"]
+    GuardrailsCheck -->|✅ Career Scope| IntentCheck{"🧠 Intent Parser\n(Profile update intent?)"}
+    
+    IntentCheck -->|✏️ Yes: Update Detected| DBUpdate["Direct MySQL Update\n(cyb_user_skill / cyb_user)"]
+    DBUpdate --> StateStore
+    IntentCheck -->|🔍 No: Discovery / Search| StateStore["📦 Multi-Turn Session State (CAS)\n(Load active filters & state_version)"]
+    
+    StateStore --> QueryRewrite["🔤 Query Rewriter & Taxonomy Resolver\n(Resolve skills, designations & locations)"]
+    
+    subgraph RetrievalSubsystem["⚡ Concurrent Hybrid Retrieval Subsystem"]
+        QueryRewrite --> ForkRetrieval{"Parallel Retrieval"}
+        ForkRetrieval -->|Lexical Match| MeiliQuery["Meilisearch (BM25)\n(Fast exact & typo-tolerant)"]
+        ForkRetrieval -->|Semantic Match| JobMatchQuery["CollarCheck JobMatch API\n(Dense neural vector ranking)"]
+        
+        JobMatchQuery -->|Timeout >5s or Error| Fallback["Graceful Fallback\n(100% Meilisearch)"]
+        MeiliQuery --> RRF_Merge["Reciprocal Rank Fusion (RRF)\nScore = sum(w / (60 + rank))\nw_meili=0.70, w_jobmatch=0.30"]
+        JobMatchQuery --> RRF_Merge
+        Fallback --> RRF_Merge
+    end
+    
+    RRF_Merge --> ContextAssembly["📝 Context & Prompt Assembly\n(System Prompt + History + 15m Cached Profile + Top RRF Results)"]
+    
+    ContextAssembly --> ConnCheck{"📡 Client Disconnected?\n(await req.is_disconnected)"}
+    ConnCheck -->|❌ Yes| AbortGen["Abort Request\n(Save LLM token spend)"]
+    ConnCheck -->|✅ No| LLMCall["🤖 Pooled LLM Call\n(OpenAI GPT-4o / Groq LLaMA via httpx pool)"]
+    
+    LLMCall --> GroundingAudit{"🔍 Deterministic Hallucination Audit\n(Emitted IDs ⊆ Allowed IDs?)"}
+    GroundingAudit -->|⚠️ Hallucinated IDs Found| PurgeIDs["Purge Fabricated Entities\n(Strip unauthorized cards)"]
+    GroundingAudit -->|✅ All Grounded| FormatPayload["Format Output Payload\n(Text + Playcards + Action Chips)"]
+    PurgeIDs --> FormatPayload
+    
+    FormatPayload --> RouteOutput{"Endpoint Type?"}
+    RouteOutput -->|POST /chat| JSONResponse["Buffered JSON Response\n(ChatResponse)"]
+    RouteOutput -->|POST /chat/stream| SSEResponse["SSE Event Stream\n(event: delta ➔ results ➔ done)"]
+    
+    JSONResponse --> End(["🖥️ UI Renders Response, Playcards & Roadmap"])
+    SSEResponse --> End
 ```
 
-### Step-by-Step Data Journey:
+### 🔄 End-to-End Execution Sequence Diagram
 
-1. **Request Ingestion (`POST /chat`)**: Frontend sends user query payload (~100–500 bytes).
-2. **Safety Guardrails**: Fast regex scanner checks for non-permitted or out-of-scope prompts.
-3. **Intent Detection & DB Auto-Update**: If the message contains profile edits (e.g., *"I updated my skill to React"*), `parse_profile_update()` extracts the entity and updates `cyb_user_skill` / `cyb_user` directly in SQL.
-4. **Context Synthesis & In-Memory Caching ([`backend/services/user_data_service.py`](file:///c:/UNG/chatbot_Quadrant/backend/services/user_data_service.py))**:
-   * Fetches user profile data and caches it for 15 minutes (`CACHE_TTL_SECONDS = 900`).
-   * [`backend/services/user_data_extractor.py`](file:///c:/UNG/chatbot_Quadrant/backend/services/user_data_extractor.py) converts raw user profile fields into a structured text prompt block.
-5. **RAG Search Retrieval**: Relevant job postings or candidate cards are retrieved via high-speed Meilisearch and Hybrid search queries.
-6. **Prompt Assembly & LLM Call**: System prompt + User Profile Block + Search Context are packaged into a ~2,000–3,000 token payload sent to OpenAI or Groq.
-7. **Security Verification**: Ensures candidate IDs returned in LLM output match authorized search results (`unauthorised = emitted - allowed_ids`).
-8. **UI Delivery**: Returns JSON reply containing formatted response text, action controls, playcards, and candidate/job result cards to the frontend.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User / Browser
+    participant UI as Web Frontend (HTML/JS)
+    participant Gateway as FastAPI Gateway (/chat, /chat/stream)
+    participant Auth as JWT Auth Interceptor
+    participant Telemetry as Telemetry & Stage Timers
+    participant Guardrails as Guardrails & Intent Filter
+    participant StateCAS as CAS Session State Store
+    participant Hybrid as Hybrid Searcher (RRF)
+    participant Meili as Meilisearch (BM25)
+    participant JobMatch as JobMatch Neural API
+    participant Cache as Profile Context Cache (15m TTL)
+    participant LLM as LLM Service (OpenAI / Groq)
+    participant Validator as Hallucination & Security Audit
+
+    User->>UI: Types query (e.g. "Find Senior React Devs in Pune")
+    UI->>Gateway: POST /chat or /chat/stream (Bearer JWT + ChatRequest)
+    Gateway->>Auth: verify_token(JWT)
+    Auth-->>Gateway: Authenticated User (user_id, role, slug)
+    Gateway->>Telemetry: start_request_timing() (Generate req_id)
+
+    alt Streaming Ingress (POST /chat/stream)
+        Gateway-->>UI: event: start (version, req_id, model, timestamp)
+    end
+
+    Gateway->>Guardrails: check_guardrails(last_user_msg)
+    alt Out of scope / Policy violation
+        Guardrails-->>Gateway: Blocked prompt message
+        Gateway-->>UI: Return friendly deflection response (Terminal)
+    end
+
+    Gateway->>StateCAS: Load conversational state & filters (CAS version check)
+    StateCAS-->>Gateway: Active filters (designation, location, salary, pagination)
+
+    par Concurrent Retrieval via RRF
+        Gateway->>Hybrid: Execute Hybrid Query
+        Hybrid->>Meili: BM25 exact & typo-tolerant keyword search
+        Meili-->>Hybrid: Ranked document list [r_meili]
+        opt Job Match API Enabled
+            Hybrid->>JobMatch: Dense semantic embedding retrieval
+            JobMatch-->>Hybrid: Semantic ranked list [r_jobmatch]
+        end
+        Hybrid->>Hybrid: Apply Reciprocal Rank Fusion: RRF = sum(w / (60 + r))
+        Hybrid-->>Gateway: Fused & deduplicated document candidates
+    and Profile Context Hydration
+        Gateway->>Cache: Fetch user profile & company metadata
+        Cache-->>Gateway: Structured profile context block
+    and Keepalive Engine (if Streaming)
+        loop While Retrieval in Progress
+            Gateway-->>UI: : keepalive (prevents proxy & browser timeouts)
+        end
+    end
+
+    Gateway->>Gateway: Check client connection: await req.is_disconnected()
+    alt Client Disconnected Mid-Retrieval
+        Gateway-->>Gateway: Abort pipeline & save LLM token costs
+    end
+
+    Gateway->>LLM: get_chat_completion / stream LLM call (via pooled httpx client)
+    
+    alt Streaming Response (POST /chat/stream)
+        loop Token Generation
+            LLM-->>Gateway: Chunk / Delta text
+            Gateway-->>UI: event: delta {"content": "chunk..."}
+        end
+    else Buffered Response (POST /chat)
+        LLM-->>Gateway: Full completion text
+    end
+
+    Gateway->>Validator: Audit candidate IDs: (emitted_ids - allowed_ids)
+    Validator-->>Gateway: Sanitized reply & validated card metadata
+
+    alt Streaming Completion
+        Gateway-->>UI: event: results (playcards, action chips, roadmap)
+        Gateway-->>UI: event: done (request_id, usage tokens, timing)
+    else Buffered JSON Response
+        Gateway-->>UI: ChatResponse (reply, results, action_metadata, chips)
+    end
+    UI-->>User: Renders interactive UI with text, playcards & action chips
+```
+
+### 📋 Detailed Step-by-Step Data Journey
+
+1. **Ingress & Authentication (`POST /chat` & `POST /chat/stream`)**:
+   - The frontend issues an HTTP request containing the conversation history (`ChatRequest`), optional session identifiers, and bearer JWT tokens.
+   - FastAPI dependency `verify_token` decrypts and verifies the JWT claims, resolving the user's platform identity (`u_db_id`), role (`employer` vs `candidate/employee`), and authorization privileges.
+   - Unique request correlation IDs (`req_id`) are generated via `backend/utils/timing.py` and attached to logging contexts via `LogRecordFactory`.
+
+2. **Pre-Flight Safety Guardrails (`backend/utils/utils.py`)**:
+   - High-speed regex scanners intercept prohibited queries (injection attempts, off-topic prompts, system prompt leakage attacks).
+   - If triggered, the pipeline terminates immediately with a safe canned deflection, avoiding unnecessary database and LLM compute charges.
+
+3. **User Intent Classification & In-Flight Profile Updates (`user_data_intent_parser.py`)**:
+   - Parses whether the conversational query carries direct profile mutation intent (e.g., *"I have 5 years experience in React"*, *"Update my current location to Bangalore"*).
+   - If detected, executes direct transactional updates into MySQL tables (`cyb_user`, `cyb_user_skill`, `cyb_user_experience`) and marks local state for re-indexing.
+
+4. **Multi-Turn Session State & Optimistic CAS Locking (`backend/utils/session_state.py`)**:
+   - Loads existing session criteria (previous search filters, active salary ranges, remote/on-site job modes, candidate pagination offsets).
+   - Utilizes Atomic **Compare-And-Swap (CAS)** with monotonically increasing `state_version` integers to protect against race conditions from rapid concurrent user queries or multi-tab sessions.
+
+5. **Taxonomy Normalization & Query Rewriting (`query_rewriter.py` & `token_resolver.py`)**:
+   - Resolves unstructured conversational expressions into database-backed taxonomies (e.g., mapping colloquial *"node dev"* into formal designation ID and skills `Node.js`, `Express`).
+   - Normalizes geographic locations via `location_resolver.py` against city, state, and country master tables.
+
+6. **Concurrent Hybrid Retrieval & Reciprocal Rank Fusion (RRF)**:
+   - Queries **Meilisearch** for BM25 lexical keyword retrieval with typo tolerance.
+   - Concurrently invokes the **CollarCheck Job Match API** for vector semantic relevance.
+   - Fuses and re-ranks results using Reciprocal Rank Fusion ($k=60$, $w_{\text{meili}}=0.70$, $w_{\text{jobmatch}}=0.30$). If the external neural service times out ($>5.0\text{s}$), the engine falls back gracefully to 100% Meilisearch without dropping the request.
+
+7. **Context Assembly & Keepalive Heartbeat (`backend/utils/sse.py`)**:
+   - Combines the system prompt, bounded user history, cached profile summary (15-min TTL), and retrieved search results into a clean 2,500–3,500 token prompt payload.
+   - In streaming mode, `await_with_keepalive` continuously sends SSE heartbeat comments (`: keepalive\n\n`) to prevent intermediate proxies, firewalls, and cloud load balancers from closing idle connections during retrieval.
+
+8. **Loop-Aware Connection-Pooled LLM Generation (`backend/services/llm_service.py`)**:
+   - Calls OpenAI GPT or Groq LLaMA models over a pooled `httpx.AsyncClient` (`max_connections=50`, `max_keepalive_connections=20`).
+   - Dynamically validates event-loop affinity (`_app_llm_loop == current_loop`) to avoid `RuntimeError` cross-loop exceptions.
+   - Checks `await req.is_disconnected()` between chunk yields; if the client closed the tab, generation halts immediately to conserve API credits.
+
+9. **Deterministic Security Verification & Hallucination Audit (`backend/utils/retrieval_evaluator.py`)**:
+   - Extracts candidate/job entity IDs from the generated text and compares against `allowed_ids` collected during search retrieval:
+     $$\text{Unauthorized} = \text{Emitted IDs} - \text{Allowed IDs}$$
+   - Any hallucinated IDs or fabricated cards are purged prior to UI serialization.
+   - Evaluates factual consistency against expected profile attributes.
+
+10. **Delivery & UI Rendering (`frontend/index.html`)**:
+    - **Buffered Mode**: Emits structured `ChatResponse` JSON containing message text, verified result cards, action metadata, pagination tokens, and interactive suggestion chips.
+    - **Streaming Mode**: Streams typed events (`start`, `delta`, `results`, `done`, `error`) parsed incrementally by the frontend `EventSource` consumer to display real-time typing indicators, candidate cards, and employment verification roadmaps.
 
 ---
 

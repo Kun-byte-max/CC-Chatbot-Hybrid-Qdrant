@@ -13,9 +13,22 @@ import re
 import logging
 from typing import Dict, Any, List, Optional, Tuple, Union
 from backend.services.user_data_intent_parser import UserIntent
-from backend.services.user_data_extractor import FORBIDDEN_KEYS, scrub_sensitive_keys, is_truthy, is_current_role, is_previous_role
+from backend.services.user_data_extractor import (
+    FORBIDDEN_KEYS,
+    scrub_sensitive_keys,
+    is_truthy,
+    is_current_role,
+    is_previous_role,
+    parse_optional_bool,
+)
 
 log = logging.getLogger(__name__)
+
+
+def is_strict_claim_status_enabled() -> bool:
+    """Returns True if strict company claim-status resolution mode is enabled."""
+    import os
+    return os.getenv("STRICT_CLAIM_STATUS_ENABLED", "false").lower() in ("true", "1", "yes")
 
 
 def _is_safe_public_url(url: Optional[str]) -> bool:
@@ -77,9 +90,26 @@ def _extract_company_name_from_query(
 
     q_lower = query.lower()
 
-    # 1. Exact full containment match (e.g. prompt explicitly contains "Google LLC")
+    # 1. Exact full containment match (with casing and trailing punctuation normalization)
     if available_companies:
-        exact_matches = [comp for comp in available_companies if comp and comp.lower() in q_lower]
+        q_tokens = [t for t in re.split(r"[^\w]+", q_lower) if t]
+        exact_matches = []
+        for comp in available_companies:
+            if not comp:
+                continue
+            c_lower = comp.lower()
+            if c_lower in q_lower:
+                exact_matches.append(comp)
+                continue
+            # Match token sequence when surrounding punctuation differs
+            c_tokens = [t for t in re.split(r"[^\w]+", c_lower) if t]
+            if c_tokens and q_tokens:
+                n, m = len(q_tokens), len(c_tokens)
+                for i in range(n - m + 1):
+                    if q_tokens[i:i+m] == c_tokens:
+                        exact_matches.append(comp)
+                        break
+
         if len(exact_matches) == 1:
             return exact_matches[0]
         elif len(exact_matches) > 1:
@@ -183,7 +213,9 @@ def _generate_record_composite_key(rec: Dict[str, Any], role_idx: int = 0) -> st
 def build_selection_metadata(
     history: List[Dict[str, Any]],
     prompt_text: str = "Which employment record would you like to check?",
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    user_id: Optional[Union[str, int]] = None,
+    role: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Builds structured employment selection metadata for role-level disambiguation and saves session option mapping."""
     options = []
@@ -222,7 +254,7 @@ def build_selection_metadata(
     if session_id and option_mapping:
         try:
             from backend.utils.session_state import set_session_option_mapping
-            set_session_option_mapping(session_id, option_mapping)
+            set_session_option_mapping(session_id, option_mapping, role=role, user_id=user_id)
         except Exception as e:
             log.warning("Failed to save session option mapping: %s", e)
 
@@ -273,7 +305,9 @@ def resolve_employment_selection_context(
     session_id: Optional[str] = None,
     consume_key: bool = True,
     requested_level: Optional[int] = None,
-    is_generic_summary: bool = False
+    is_generic_summary: bool = False,
+    user_id: Optional[Union[str, int]] = None,
+    role: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
     """
     Resolves employment selection context:
@@ -302,8 +336,8 @@ def resolve_employment_selection_context(
     if session_id:
         try:
             from backend.utils.session_state import get_selected_employment_context, get_selected_employment_record_key
-            stored_company = get_selected_employment_context(session_id)
-            stored_key = get_selected_employment_record_key(session_id)
+            stored_company = get_selected_employment_context(session_id, role=role, user_id=user_id)
+            stored_key = get_selected_employment_record_key(session_id, role=role, user_id=user_id)
         except Exception as e:
             log.warning("Failed to fetch stored employment context: %s", e)
 
@@ -335,7 +369,7 @@ def resolve_employment_selection_context(
         if session_id:
             try:
                 from backend.utils.session_state import get_session_option_mapping
-                opt_map = get_session_option_mapping(session_id)
+                opt_map = get_session_option_mapping(session_id, role=role, user_id=user_id)
                 target_composite_key = opt_map.get(submitted_key)
                 has_session_mapping = True
             except Exception as e:
@@ -363,8 +397,8 @@ def resolve_employment_selection_context(
                     try:
                         from backend.utils.session_state import set_selected_employment_context, consume_session_option_mapping
                         if consume_key:
-                            consume_session_option_mapping(session_id, submitted_key)
-                        set_selected_employment_context(session_id, target_name, record_key=target_key)
+                            consume_session_option_mapping(session_id, submitted_key, role=role, user_id=user_id)
+                        set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                     except Exception as e:
                         log.warning("Failed to save selected record key: %s", e)
                 return ([single_role_entry], None, target_name)
@@ -373,25 +407,25 @@ def resolve_employment_selection_context(
                 if session_id:
                     try:
                         from backend.utils.session_state import clear_selected_employment_context
-                        clear_selected_employment_context(session_id)
+                        clear_selected_employment_context(session_id, role=role, user_id=user_id)
                     except Exception as e:
                         log.warning("Failed to clear invalid selection context: %s", e)
-                meta = build_selection_metadata(history, prompt_text="Your previous selection could not be verified against current records. Please select an option below:", session_id=session_id)
+                meta = build_selection_metadata(history, prompt_text="Your previous selection could not be verified against current records. Please select an option below:", session_id=session_id, user_id=user_id, role=role)
                 return ([], meta, None)
         else:
             # Key mapping missing/consumed/expired or a replay attempt -> Clear selection & reject
             if session_id:
                 try:
                     from backend.utils.session_state import clear_selected_employment_context
-                    clear_selected_employment_context(session_id)
+                    clear_selected_employment_context(session_id, role=role, user_id=user_id)
                 except Exception as e:
                     log.warning("Failed to clear selection context: %s", e)
-            meta = build_selection_metadata(history, prompt_text="That selection option is no longer valid. Please choose from the current options:", session_id=session_id)
+            meta = build_selection_metadata(history, prompt_text="That selection option is no longer valid. Please choose from the current options:", session_id=session_id, user_id=user_id, role=role)
             return ([], meta, None)
 
     # If "other company" or relative reference with multiple candidates, generate selection metadata
     if is_other_query and len(history) > 1:
-        meta = build_selection_metadata(history, prompt_text="Which employment record would you like to check?", session_id=session_id)
+        meta = build_selection_metadata(history, prompt_text="Which employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
         return ([], meta, None)
 
     # 1. Previous employment query specific handling
@@ -416,7 +450,7 @@ def resolve_employment_selection_context(
                 single_role_entry = {**target_comp, "roles": [target_role]}
                 return ([single_role_entry], None, target_name)
             elif len(role_matches) > 1:
-                meta = build_selection_metadata(history, prompt_text="Multiple matching records found. Which would you like to check?", session_id=session_id)
+                meta = build_selection_metadata(history, prompt_text="Multiple matching records found. Which would you like to check?", session_id=session_id, user_id=user_id, role=role)
                 return ([], meta, None)
 
         if stored_company:
@@ -442,12 +476,12 @@ def resolve_employment_selection_context(
                 if session_id:
                     try:
                         from backend.utils.session_state import set_selected_employment_context
-                        set_selected_employment_context(session_id, target_name, record_key=target_key)
+                        set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                     except Exception as e:
                         log.warning("Failed to save selected employment context: %s", e)
                 return (exact_comp_matches, None, target_name)
             elif len(exact_comp_matches) > 1:
-                meta = build_selection_metadata(exact_comp_matches, prompt_text=f"Which '{matched_company}' employment record would you like to check?", session_id=session_id)
+                meta = build_selection_metadata(exact_comp_matches, prompt_text=f"Which '{matched_company}' employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
                 return ([], meta, None)
 
         if len(previous_recs) == 0:
@@ -459,7 +493,7 @@ def resolve_employment_selection_context(
             if session_id:
                 try:
                     from backend.utils.session_state import set_selected_employment_context
-                    set_selected_employment_context(session_id, target_name, record_key=target_key)
+                    set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                 except Exception as e:
                     log.warning("Failed to save selected employment context: %s", e)
             return ([previous_recs[0]], None, target_name)
@@ -486,12 +520,12 @@ def resolve_employment_selection_context(
                 if session_id:
                     try:
                         from backend.utils.session_state import set_selected_employment_context
-                        set_selected_employment_context(session_id, target_name, record_key=target_key)
+                        set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                     except Exception as e:
                         log.warning("Failed to save selected employment context: %s", e)
                 return ([target_rec], None, target_name)
             else:
-                meta = build_selection_metadata(previous_recs, prompt_text="Which previous employment record would you like to check?", session_id=session_id)
+                meta = build_selection_metadata(previous_recs, prompt_text="Which previous employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
                 return ([], meta, None)
 
         if re.search(r"\b(oldest|first)\b", q_lower):
@@ -513,15 +547,15 @@ def resolve_employment_selection_context(
                 if session_id:
                     try:
                         from backend.utils.session_state import set_selected_employment_context
-                        set_selected_employment_context(session_id, target_name, record_key=target_key)
+                        set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                     except Exception as e:
                         log.warning("Failed to save selected employment context: %s", e)
                 return ([target_rec], None, target_name)
             else:
-                meta = build_selection_metadata(previous_recs, prompt_text="Which previous employment record would you like to check?", session_id=session_id)
+                meta = build_selection_metadata(previous_recs, prompt_text="Which previous employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
                 return ([], meta, None)
 
-        meta = build_selection_metadata(previous_recs, prompt_text="Which previous employment record would you like to check?", session_id=session_id)
+        meta = build_selection_metadata(previous_recs, prompt_text="Which previous employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
         return ([], meta, None)
 
     # 2. Check if query matches stored session context first for generic follow-up queries
@@ -530,8 +564,8 @@ def resolve_employment_selection_context(
     if session_id:
         try:
             from backend.utils.session_state import get_selected_employment_context, get_selected_employment_record_key
-            stored_company = get_selected_employment_context(session_id)
-            stored_key = get_selected_employment_record_key(session_id)
+            stored_company = get_selected_employment_context(session_id, role=role, user_id=user_id)
+            stored_key = get_selected_employment_record_key(session_id, role=role, user_id=user_id)
         except Exception as e:
             log.warning("Failed to fetch selected employment context: %s", e)
 
@@ -556,7 +590,7 @@ def resolve_employment_selection_context(
             single_role_entry = [{**target_comp, "roles": [target_role]}]
             return (single_role_entry, None, target_name)
         elif len(role_matches) > 1:
-            meta = build_selection_metadata(history, prompt_text="Multiple matching records found. Which would you like to check?", session_id=session_id)
+            meta = build_selection_metadata(history, prompt_text="Multiple matching records found. Which would you like to check?", session_id=session_id, user_id=user_id, role=role)
             return ([], meta, None)
 
     matched_company = _extract_company_name_from_query(query, available_companies, history) if query else None
@@ -569,14 +603,15 @@ def resolve_employment_selection_context(
         if len(exact_comp_matches) == 1:
             target_comp = exact_comp_matches[0]
             target_name = str(target_comp.get("company")).strip()
-            roles = target_comp.get("roles") if isinstance(target_comp.get("roles"), list) else [target_comp]
+            raw_roles = target_comp.get("roles")
+            roles = raw_roles if (isinstance(raw_roles, list) and len(raw_roles) > 0) else [target_comp]
 
-            if len(roles) == 1:
+            if len(roles) <= 1:
                 target_key = _generate_record_composite_key(target_comp, role_idx=0)
                 if session_id:
                     try:
                         from backend.utils.session_state import set_selected_employment_context
-                        set_selected_employment_context(session_id, target_name, record_key=target_key)
+                        set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                     except Exception as e:
                         log.warning("Failed to save selected employment context: %s", e)
                 return (exact_comp_matches, None, target_name)
@@ -593,15 +628,15 @@ def resolve_employment_selection_context(
                     if session_id:
                         try:
                             from backend.utils.session_state import set_selected_employment_context
-                            set_selected_employment_context(session_id, target_name, record_key=target_key)
+                            set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                         except Exception as e:
                             log.warning("Failed to save selected active role context: %s", e)
                     return (single_active_entry, None, target_name)
                 else:
-                    meta = build_selection_metadata(exact_comp_matches, prompt_text=f"Which '{target_name}' employment record would you like to check?", session_id=session_id)
+                    meta = build_selection_metadata(exact_comp_matches, prompt_text=f"Which '{target_name}' employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
                     return ([], meta, target_name)
         elif len(exact_comp_matches) > 1:
-            meta = build_selection_metadata(exact_comp_matches, prompt_text=f"Which '{matched_company}' employment record would you like to check?", session_id=session_id)
+            meta = build_selection_metadata(exact_comp_matches, prompt_text=f"Which '{matched_company}' employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
             return ([], meta, matched_company)
 
     # If no explicit matching company in query, use stored session context if available
@@ -623,7 +658,7 @@ def resolve_employment_selection_context(
             single_role_entry = [{**target_comp, "roles": [target_role]}]
             return (single_role_entry, None, target_name)
         elif len(role_matches) > 1:
-            meta = build_selection_metadata(history, prompt_text="Multiple matching records found. Which would you like to check?", session_id=session_id)
+            meta = build_selection_metadata(history, prompt_text="Multiple matching records found. Which would you like to check?", session_id=session_id, user_id=user_id, role=role)
             return ([], meta, None)
 
     if stored_company:
@@ -650,7 +685,7 @@ def resolve_employment_selection_context(
                 if session_id:
                     try:
                         from backend.utils.session_state import set_selected_employment_context
-                        set_selected_employment_context(session_id, target_name, record_key=target_key)
+                        set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                     except Exception as e:
                         log.warning("Failed to save selected role context: %s", e)
                 return (single_role_entry, None, target_name)
@@ -659,18 +694,18 @@ def resolve_employment_selection_context(
             else:
                 return (stored_matches, None, target_name)
         elif len(stored_matches) > 1:
-            meta = build_selection_metadata(stored_matches, prompt_text=f"Which '{stored_company}' employment record would you like to check?", session_id=session_id)
+            meta = build_selection_metadata(stored_matches, prompt_text=f"Which '{stored_company}' employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
             return ([], meta, None)
 
 
     # Handle unlisted company explicit request if no stored context applied
     if matched_company:
-        meta = build_selection_metadata(history, prompt_text=f"I couldn't find an employment record for '{matched_company}'. Which employment record would you like to check?", session_id=session_id)
+        meta = build_selection_metadata(history, prompt_text=f"I couldn't find an employment record for '{matched_company}'. Which employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
         return ([], meta, matched_company)
 
     # Bypassing single-record auto-selection shortcut when an explicit verification level request is active AND no stored selection context exists
     if requested_level is not None and not (stored_key or stored_company):
-        meta = build_selection_metadata(history, prompt_text="Which employment record would you like to check?", session_id=session_id)
+        meta = build_selection_metadata(history, prompt_text="Which employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
         return ([], meta, None)
 
     # 4. Single company or single active employment auto-selection
@@ -696,19 +731,19 @@ def resolve_employment_selection_context(
                     if session_id:
                         try:
                             from backend.utils.session_state import set_selected_employment_context
-                            set_selected_employment_context(session_id, target_name, record_key=target_key)
+                            set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                         except Exception as e:
                             log.warning("Failed to save auto-selected active role context: %s", e)
                     return (single_active_entry, None, target_name)
                 else:
-                    meta = build_selection_metadata(single_matches, prompt_text=f"Which '{target_name}' employment record would you like to check?", session_id=session_id)
+                    meta = build_selection_metadata(single_matches, prompt_text=f"Which '{target_name}' employment record would you like to check?", session_id=session_id, user_id=user_id, role=role)
                     return ([], meta, target_name)
             else:
                 target_key = _generate_record_composite_key(target_comp, role_idx=0)
                 if session_id:
                     try:
                         from backend.utils.session_state import set_selected_employment_context
-                        set_selected_employment_context(session_id, target_name, record_key=target_key)
+                        set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
                     except Exception as e:
                         log.warning("Failed to save auto-selected employment context: %s", e)
                 return (single_matches, None, target_name)
@@ -721,7 +756,7 @@ def resolve_employment_selection_context(
         if session_id:
             try:
                 from backend.utils.session_state import set_selected_employment_context
-                set_selected_employment_context(session_id, target_name, record_key=target_key)
+                set_selected_employment_context(session_id, target_name, record_key=target_key, role=role, user_id=user_id)
             except Exception as e:
                 log.warning("Failed to save auto-selected active employment context: %s", e)
         return ([target_rec], None, target_name)
@@ -729,7 +764,7 @@ def resolve_employment_selection_context(
     if not query or not str(query).strip():
         return (history, None, None)
 
-    meta = build_selection_metadata(history, session_id=session_id)
+    meta = build_selection_metadata(history, session_id=session_id, user_id=user_id, role=role)
     return ([], meta, None)
 
 
@@ -769,6 +804,9 @@ def _format_single_intent_impl(
             return "The request timed out. Please try again in a moment."
         if api_response.get("status") is False and (api_response.get("error") or status_code):
             return "I couldn't retrieve your information right now due to a service connection issue."
+
+    user_id = kwargs.get("user_id")
+    role = kwargs.get("role")
 
     try:
         # 1. PROFILE_INCOMPLETE
@@ -839,7 +877,7 @@ def _format_single_intent_impl(
             if not history:
                 return "I couldn't find any employment history recorded on your account."
 
-            filtered_records, sel_meta, target_company = resolve_employment_selection_context(query, history, session_id=session_id, consume_key=False)
+            filtered_records, sel_meta, target_company = resolve_employment_selection_context(query, history, session_id=session_id, consume_key=False, user_id=user_id, role=role)
 
             if not filtered_records and sel_meta:
                 prompt = sel_meta.get("prompt", "Which employment record would you like to check?")
@@ -880,7 +918,7 @@ def _format_single_intent_impl(
             history = extracted_data.get("employment_history") or []
             records = history if history else emp_skills
 
-            filtered_records, sel_meta, target_company = resolve_employment_selection_context(query, records, session_id=session_id, consume_key=False)
+            filtered_records, sel_meta, target_company = resolve_employment_selection_context(query, records, session_id=session_id, consume_key=False, user_id=user_id, role=role)
 
             if not filtered_records and sel_meta:
                 prompt = sel_meta.get("prompt", "Which employment record would you like to check?")
@@ -918,7 +956,7 @@ def _format_single_intent_impl(
             history = extracted_data.get("employment_history") or []
             records = history if history else salaries
 
-            filtered_records, sel_meta, target_company = resolve_employment_selection_context(query, records, session_id=session_id, consume_key=False)
+            filtered_records, sel_meta, target_company = resolve_employment_selection_context(query, records, session_id=session_id, consume_key=False, user_id=user_id, role=role)
 
             if not filtered_records and sel_meta:
                 prompt = sel_meta.get("prompt", "Which employment record would you like to check?")
@@ -975,7 +1013,35 @@ def _format_single_intent_impl(
                 res_str = "I couldn't find any employment records to check company claimed status."
                 return (res_str, None) if return_metadata else res_str
 
-            filtered_history, sel_meta, matched_company = resolve_employment_selection_context(query, history, session_id=session_id, consume_key=False)
+            def _resolve_company_claim_status(c: Dict[str, Any]) -> Optional[bool]:
+                """
+                Resolves company claim status according to canonical schema precedence:
+                1. `company_claim_status` when present and not None.
+                2. `claim_status` when present and not None.
+                3. If both canonical fields are absent or None:
+                   - In strict mode (STRICT_CLAIM_STATUS_ENABLED=true): returns None (Unknown).
+                   - In legacy mode: falls back to `is_verified` compatibility check.
+                Returns True for Claimed, False for Not Claimed, or None for Unknown.
+                """
+                if not isinstance(c, dict):
+                    return None
+                val = c.get("company_claim_status")
+                if val is not None:
+                    return parse_optional_bool(val)
+                val = c.get("claim_status")
+                if val is not None:
+                    return parse_optional_bool(val)
+
+                # Strict mode check: domain verification (is_verified) NEVER implies platform claim status
+                if is_strict_claim_status_enabled():
+                    return None
+
+                # Compatibility fallback for legacy records lacking both claim-status fields
+                if "is_verified" in c and c.get("is_verified") is not None:
+                    return parse_optional_bool(c.get("is_verified"))
+                return None
+
+            filtered_history, sel_meta, matched_company = resolve_employment_selection_context(query, history, session_id=session_id, consume_key=False, user_id=user_id, role=role)
 
             q_lower = (query or "").lower().strip()
             asking_not_claimed = bool(re.search(r"\b(not\s+claimed|unclaimed)\b", q_lower))
@@ -983,7 +1049,7 @@ def _format_single_intent_impl(
 
             # Filter for multiple company questions: "which of my companies are claimed/not claimed"
             if asking_claimed_only and not matched_company:
-                claimed_comps = [c for c in history if isinstance(c, dict) and is_truthy(c.get("is_verified"))]
+                claimed_comps = [c for c in history if isinstance(c, dict) and _resolve_company_claim_status(c) is True]
                 if not claimed_comps:
                     res_str = "None of your listed companies are currently claimed."
                     return (res_str, None) if return_metadata else res_str
@@ -992,7 +1058,7 @@ def _format_single_intent_impl(
                 return (res_str, None) if return_metadata else res_str
 
             if asking_not_claimed and not matched_company:
-                unclaimed_comps = [c for c in history if isinstance(c, dict) and not is_truthy(c.get("is_verified"))]
+                unclaimed_comps = [c for c in history if isinstance(c, dict) and _resolve_company_claim_status(c) is False]
                 if not unclaimed_comps:
                     res_str = "All of your listed companies are currently claimed."
                     return (res_str, None) if return_metadata else res_str
@@ -1017,11 +1083,13 @@ def _format_single_intent_impl(
                 if not isinstance(comp, dict):
                     continue
                 comp_name = comp.get("company") or "Company"
-                is_ver = is_truthy(comp.get("is_verified"))
-                if is_ver:
+                claim_bool = _resolve_company_claim_status(comp)
+                if claim_bool is True:
                     lines.append(f"**{comp_name}** is a claimed company.")
-                else:
+                elif claim_bool is False:
                     lines.append(f"**{comp_name}** is not a claimed company.")
+                else:
+                    lines.append(f"The claim status for **{comp_name}** is currently unknown.")
 
             res_str = "\n".join(lines)
             return (res_str, None) if return_metadata else res_str
@@ -1045,7 +1113,7 @@ def _format_single_intent_impl(
                 from backend.services.user_data_intent_parser import detect_requested_level
                 req_lvl = detect_requested_level(query)
 
-            filtered_history, sel_meta, matched_company = resolve_employment_selection_context(query, history, session_id=session_id, requested_level=req_lvl, consume_key=False)
+            filtered_history, sel_meta, matched_company = resolve_employment_selection_context(query, history, session_id=session_id, requested_level=req_lvl, consume_key=False, user_id=user_id, role=role)
 
             # If a specific verification level was requested (e.g. Level 1, 2, 3), render focused guidance
             # for resolved company context, or prompt for explicit selection if ambiguous.
@@ -1610,7 +1678,9 @@ def format_multi_intent_response(
     query: str = "",
     session_id: Optional[str] = None,
     return_metadata: bool = False,
-    requested_level: Optional[int] = None
+    requested_level: Optional[int] = None,
+    user_id: Optional[Union[str, int]] = None,
+    role: Optional[str] = None,
 ) -> Union[str, Tuple[str, Optional[Dict[str, Any]]]]:
     if not intents:
         msg = "How can I assist you with your profile or employment details?"
@@ -1676,10 +1746,12 @@ def format_multi_intent_response(
                     query=query,
                     session_id=session_id,
                     return_metadata=True,
-                    requested_level=requested_level
+                    requested_level=requested_level,
+                    user_id=user_id,
+                    role=role
                 )
             except TypeError:
-                res = format_single_intent(intent, data, api_resp, query=query, requested_level=requested_level)
+                res = format_single_intent(intent, data, api_resp, query=query, requested_level=requested_level, user_id=user_id, role=role)
 
             if isinstance(res, tuple) and len(res) == 2:
                 sec_text, sel_meta = res

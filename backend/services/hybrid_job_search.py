@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from typing import Dict, Any, List, Optional, Tuple
+import httpx
 
 try:
     from backend.config.config import (
@@ -21,7 +22,14 @@ try:
         HYBRID_RETRIEVAL_LIMIT,
         MAX_RESULTS,
     )
-    from backend.services.job_match_client import job_match_client, JobMatchException
+    from backend.services.job_match_client import (
+        job_match_client,
+        JobMatchException,
+        CandidateNotIndexedException,
+        JobMatchAuthException,
+        JobMatchContractException,
+        JobMatchUnavailableException,
+    )
     from backend.services.search_client import search_jobs
     from backend.recommendation.location_matcher import LocationMatcher
     from backend.recommendation.recommendation_engine import RecommendationEngine
@@ -37,7 +45,14 @@ except ModuleNotFoundError:
         HYBRID_RETRIEVAL_LIMIT,
         MAX_RESULTS,
     )
-    from services.job_match_client import job_match_client, JobMatchException  # type: ignore
+    from services.job_match_client import (  # type: ignore
+        job_match_client,
+        JobMatchException,
+        CandidateNotIndexedException,
+        JobMatchAuthException,
+        JobMatchContractException,
+        JobMatchUnavailableException,
+    )
     from services.search_client import search_jobs  # type: ignore
     from recommendation.location_matcher import LocationMatcher  # type: ignore
     from recommendation.recommendation_engine import RecommendationEngine  # type: ignore
@@ -696,6 +711,12 @@ async def execute_hybrid_job_search(
 
     can_use_jobmatch = bool(JOB_MATCH_ENABLED and valid_candidate)
 
+    jm_outcome: str = "not_attempted_other"
+    if not JOB_MATCH_ENABLED:
+        jm_outcome = "disabled"
+    elif not valid_candidate:
+        jm_outcome = "missing_candidate_id"
+
     meili_weight, jobmatch_weight = get_mode_weights(mode)
 
     meili_attempted = True
@@ -739,11 +760,11 @@ async def execute_hybrid_job_search(
         dt = (time.time() - t0) * 1000.0
         return hits, dt
 
-    async def _fetch_jobmatch() -> Tuple[List[Dict[str, Any]], float]:
+    async def _fetch_jobmatch() -> Tuple[List[Dict[str, Any]], Optional[float], str]:
         t0 = time.time()
         results = []
         if not can_use_jobmatch:
-            return [], 0.0
+            return [], None, jm_outcome
         try:
             jm_filters = {}
             if target_role_type_id:
@@ -756,20 +777,65 @@ async def execute_hybrid_job_search(
             raw = res_data.get("results") or res_data.get("data") or []
             if isinstance(raw, list):
                 results = raw
+            outcome = "success_with_results" if results else "empty_results"
+        except CandidateNotIndexedException as cni_err:
+            log.info("[HybridSearch] Candidate not indexed (HTTP 409): %s", cni_err)
+            results = []
+            outcome = "candidate_not_indexed"
+        except JobMatchAuthException as auth_err:
+            log.critical("[HybridSearch] JobMatch authentication failure: %s", auth_err)
+            results = []
+            outcome = "authentication_failure"
+        except JobMatchContractException as contract_err:
+            log.error("[HybridSearch] JobMatch contract/validation error: %s", contract_err)
+            results = []
+            outcome = "contract_error"
+        except JobMatchUnavailableException as unavail_err:
+            cause = getattr(unavail_err, "__cause__", None)
+            err_str = str(unavail_err).lower()
+            if isinstance(cause, httpx.TimeoutException) or isinstance(unavail_err, httpx.TimeoutException) or "timeout" in err_str:
+                log.warning("[HybridSearch] JobMatch timeout: %s", unavail_err)
+                outcome = "timeout"
+            else:
+                log.info("[HybridSearch] JobMatch unavailable (%s). Fallback to Meilisearch.", unavail_err)
+                outcome = "service_unavailable"
+            results = []
+        except (httpx.TimeoutException, asyncio.TimeoutError) as timeout_err:
+            log.warning("[HybridSearch] JobMatch timeout error: %s", timeout_err)
+            results = []
+            outcome = "timeout"
         except JobMatchException as jm_err:
             log.info("[HybridSearch] JobMatch unavailable or not indexed (%s). Graceful fallback to Meilisearch.", jm_err)
             results = []
+            outcome = "service_unavailable"
         except Exception as ex:
-            log.warning("[HybridSearch] Unexpected error calling JobMatch API: %s", ex)
+            cause = getattr(ex, "__cause__", None)
+            err_str = str(ex).lower()
+            if isinstance(cause, httpx.TimeoutException) or isinstance(ex, httpx.TimeoutException) or "timeout" in err_str:
+                log.warning("[HybridSearch] JobMatch timeout: %s", ex)
+                outcome = "timeout"
+            else:
+                log.warning("[HybridSearch] Unexpected error calling JobMatch API: %s", ex)
+                outcome = "unexpected_error"
             results = []
         dt = (time.time() - t0) * 1000.0
-        return results, dt
+        return results, dt, outcome
 
     # Parallel Execution
     meili_res, jm_res = await asyncio.gather(_fetch_meilisearch(), _fetch_jobmatch(), return_exceptions=True)
 
     meili_hits, meili_ms = meili_res if isinstance(meili_res, tuple) else ([], 0.0)
-    jm_hits, jm_ms = jm_res if isinstance(jm_res, tuple) else ([], 0.0)
+    jm_ms: Optional[float] = None
+    if isinstance(jm_res, tuple):
+        if len(jm_res) == 3:
+            jm_hits, jm_ms, jm_outcome = jm_res
+        elif len(jm_res) == 2:
+            jm_hits, jm_ms = jm_res
+            jm_outcome = "success_with_results" if jm_hits else "empty_results"
+        else:
+            jm_hits, jm_ms, jm_outcome = [], None, "unexpected_error"
+    else:
+        jm_hits, jm_ms, jm_outcome = [], None, "unexpected_error"
 
     # Normalize Meilisearch hits
     normalized_map: Dict[int, NormalizedJob] = {}
@@ -989,24 +1055,59 @@ async def execute_hybrid_job_search(
 
     t_total_ms = (time.time() - t_start) * 1000.0
 
+    filters_applied = []
+    if target_mode_norm:
+        filters_applied.append("job_mode")
+    if (explicit_loc or mode == MODE_NEAR_ME) and target_city_name:
+        filters_applied.append("city")
+    if target_sal_min is not None or target_sal_max is not None:
+        filters_applied.append("salary")
+    if (
+        target_exp_min is not None
+        or target_exp_max is not None
+        or target_exp_level
+        or target_exp_ids
+        or (parsed and parsed.get("experience") is not None)
+        or ("fresher" in (last_user_msg or "").lower())
+    ):
+        filters_applied.append("experience")
+    if base_filters.get("urgent") == 1 or parsed.get("urgent"):
+        filters_applied.append("urgent")
+    if target_role_type_id:
+        filters_applied.append("role_type")
+    if keyword:
+        filters_applied.append("keyword")
+
     telemetry = {
         "search_mode": mode,
+        "search_provider": "hybrid" if jobmatch_attempted else "meilisearch",
         "job_mode_requested": target_mode_norm,
         "job_mode_rejected_count": job_mode_rejected_count,
         "salary_rejected_count": salary_rejected_count,
         "experience_rejected_count": experience_rejected_count,
+        "emp_type_rejected_count": emp_type_rejected_count,
+        "filters_applied": filters_applied,
         "candidate_present": valid_candidate,
         "meilisearch_attempted": meili_attempted,
         "jobmatch_attempted": jobmatch_attempted,
+        "jobmatch_outcome": jm_outcome,
         "meilisearch_count": len(meili_hits),
         "jobmatch_count": len(jm_hits),
         "fused_count": len(all_jobs),
         "eligible_count": len(eligible_jobs),
         "final_count": min(len(eligible_jobs), limit),
+        "rrf_input_count": len(meili_hits) + len(jm_hits),
+        "rrf_output_count": len(all_jobs),
         "meili_ms": round(meili_ms, 1),
-        "jobmatch_ms": round(jm_ms, 1),
         "total_ms": round(t_total_ms, 1),
+        "retrieval_total_ms": round(t_total_ms, 1),
     }
+
+    if jm_ms is not None:
+        telemetry["jobmatch_ms"] = round(jm_ms, 1)
+
+    if jm_outcome != "success_with_results":
+        telemetry["jobmatch_fallback_reason"] = jm_outcome
 
     log.info(
         "HYBRID_SEARCH mode=%s candidate=%s target_job_mode=%s rejected_mode_count=%d rejected_sal_count=%d rejected_exp_count=%d meilisearch_count=%d jobmatch_count=%d fused_count=%d eligible_count=%d final_count=%d total_ms=%.1fms",

@@ -384,6 +384,117 @@ def test_d4_ambiguous_partial_company_matching():
     assert "Google India" in res_formatted
 
 
+def test_d4a_overlapping_company_names_exact_short_match():
+    """D4a: Explicit short-name query resolves to short name when overlapping longer company name exists."""
+    companies = ["Acme", "Acme Technologies"]
+    res = _extract_company_name_from_query("What was my salary at Acme?", companies)
+    assert res == "Acme"
+
+    history = {
+        "employment_history": [
+            {"company": "Acme", "roles": [{"designation": "Developer"}]},
+            {"company": "Acme Technologies", "roles": [{"designation": "Architect"}]}
+        ],
+        "employment_salary": [
+            {"company": "Acme", "designation": "Developer", "salary": "50000", "salary_mode": "Per Month"},
+            {"company": "Acme Technologies", "designation": "Architect", "salary": "120000", "salary_mode": "Per Month"}
+        ]
+    }
+    formatted = format_single_intent(UserIntent.EMPLOYMENT_SALARY, history, {}, query="What was my salary at Acme?")
+    assert "Acme" in formatted
+    assert "Developer" in formatted
+    assert "Architect" not in formatted
+
+
+def test_d4b_overlapping_company_names_exact_long_match():
+    """D4b: Explicit long-name query resolves to long name (longest match precedence)."""
+    companies = ["Acme", "Acme Technologies"]
+    res = _extract_company_name_from_query("What was my salary at Acme Technologies?", companies)
+    assert res == "Acme Technologies"
+
+    history = {
+        "employment_history": [
+            {"company": "Acme", "roles": [{"designation": "Developer"}]},
+            {"company": "Acme Technologies", "roles": [{"designation": "Architect"}]}
+        ],
+        "employment_salary": [
+            {"company": "Acme", "designation": "Developer", "salary": "50000", "salary_mode": "Per Month"},
+            {"company": "Acme Technologies", "designation": "Architect", "salary": "120000", "salary_mode": "Per Month"}
+        ]
+    }
+    formatted = format_single_intent(UserIntent.EMPLOYMENT_SALARY, history, {}, query="What was my salary at Acme Technologies?")
+    assert "Acme Technologies" in formatted
+    assert "Architect" in formatted
+    assert "Developer" not in formatted
+
+
+def test_d4c_overlapping_company_names_input_order_independence():
+    """D4c: Matching outcome remains identical regardless of company list order."""
+    order_a = ["Acme", "Acme Technologies"]
+    order_b = ["Acme Technologies", "Acme"]
+
+    # Short query under both orders
+    assert _extract_company_name_from_query("What was my salary at Acme?", order_a) == "Acme"
+    assert _extract_company_name_from_query("What was my salary at Acme?", order_b) == "Acme"
+
+    # Long query under both orders
+    assert _extract_company_name_from_query("What was my salary at Acme Technologies?", order_a) == "Acme Technologies"
+    assert _extract_company_name_from_query("What was my salary at Acme Technologies?", order_b) == "Acme Technologies"
+
+    # End-to-end claim status check with reversed history record ordering
+    data_rev = {
+        "employment_history": [
+            {"company": "Acme Technologies", "claim_status": 0, "roles": []},
+            {"company": "Acme", "claim_status": 1, "roles": []}
+        ]
+    }
+    res_short = format_single_intent(UserIntent.EMPLOYMENT_COMPANY_CLAIMED, data_rev, None, query="Is Acme claimed?")
+    assert "**Acme** is a claimed company." in res_short
+
+    res_long = format_single_intent(UserIntent.EMPLOYMENT_COMPANY_CLAIMED, data_rev, None, query="Is Acme Technologies claimed?")
+    assert "**Acme Technologies** is not a claimed company." in res_long
+
+
+def test_d4d_case_and_punctuation_normalization_boundary():
+    """D4d: Direct assertions for casing, quotes, trailing punctuation, and token sequence matching."""
+    companies = ["Acme Technologies", "Global Solutions Ltd"]
+
+    # Casing variations
+    assert _extract_company_name_from_query("salary at ACME TECHNOLOGIES", companies) == "Acme Technologies"
+    assert _extract_company_name_from_query("is acme technologies claimed?", companies) == "Acme Technologies"
+
+    # Surrounding quotes and punctuation
+    assert _extract_company_name_from_query('Tell me about "Acme Technologies"!', companies) == "Acme Technologies"
+    assert _extract_company_name_from_query("details for 'Global Solutions Ltd'?", companies) == "Global Solutions Ltd"
+
+
+def test_d4e_ambiguous_partial_match_unresolved_boundary():
+    """D4e: Ambiguous partial match across multiple candidates remains unresolved (None)."""
+    companies = ["Google LLC", "Google India", "Google UK"]
+    # Single partial token 'Google' matches 3 candidates -> must return None, not pick arbitrarily
+    assert _extract_company_name_from_query("What was my salary at Google?", companies) == None
+    assert _extract_company_name_from_query("Is Google claimed?", companies) == None
+
+
+def test_d4f_claim_status_empty_and_missing_roles_handling():
+    """D4f: Company-level claim-status resolves correctly with both roles: [] and missing roles key."""
+    data_empty_roles = {
+        "employment_history": [
+            {"company": "Acme", "roles": [], "claim_status": 1}
+        ]
+    }
+    res_empty = format_single_intent(UserIntent.EMPLOYMENT_COMPANY_CLAIMED, data_empty_roles, None, query="Is Acme claimed?")
+    assert "**Acme** is a claimed company." in res_empty
+
+    data_missing_roles = {
+        "employment_history": [
+            {"company": "Acme", "claim_status": 1}
+        ]
+    }
+    res_missing = format_single_intent(UserIntent.EMPLOYMENT_COMPANY_CLAIMED, data_missing_roles, None, query="Is Acme claimed?")
+    assert "**Acme** is a claimed company." in res_missing
+
+
 def test_d5_unmatched_company_query():
     """D5: Validates clear fallback when explicit company name is not found."""
     history = {"employment_history": [{"company": "Google", "roles": []}]}

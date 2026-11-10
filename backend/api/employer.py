@@ -2,6 +2,7 @@ from typing import Optional, Dict, Any, List, Set
 import logging
 import math
 import re
+from starlette.concurrency import run_in_threadpool
 
 try:
     from backend.utils.utils import is_employer_hiring_query
@@ -105,6 +106,8 @@ def compose_final_response(result: OrchestrationResult) -> Dict[str, Any]:
             "status": "unavailable",
             "message": msg,
         }
+        if result.search_metadata is not None:
+            raw_err["search_metadata"] = result.search_metadata
         return scrub_sensitive_payload_keys(raw_err, is_root=True)
 
     raw_payload = {
@@ -173,6 +176,7 @@ async def handle_employer_context(
         from schemas.schemas import CandidateCard  # type: ignore
 
     msg_clean = (last_user_msg or "").lower().strip()
+    eff_user_id = kwargs.get("user_id") or kwargs.get("candidate_id") or kwargs.get("employer_id")
 
     # -------------------------------------------------------------------------
     # TERMINAL BRANCH 1: PAGINATION BRANCH
@@ -185,17 +189,17 @@ async def handle_employer_context(
         requested_page = int(page_num_match.group(1))
     elif re.search(r'\b(?:next\s+page|next\s+candidates|show\s+next|next)\b', msg_clean) and not re.search(r'\b(hire|candidate|role|developer|analyst|engineer|search|find|php|react|python|java|data)\b', msg_clean):
         is_pagination_cmd = True
-        saved_p_state = get_pagination_state(session_id, role="employer")
+        saved_p_state = await run_in_threadpool(get_pagination_state, session_id, role="employer", user_id=eff_user_id)
         requested_page = (saved_p_state.get("current_page", 1) + 1) if saved_p_state else 2
     elif re.search(r'\b(?:previous\s+page|prev\s+page|back\s+page|previous)\b', msg_clean) and not re.search(r'\b(hire|candidate|role|developer|analyst|engineer|search|find|php|react|python|java|data)\b', msg_clean):
         is_pagination_cmd = True
-        saved_p_state = get_pagination_state(session_id, role="employer")
+        saved_p_state = await run_in_threadpool(get_pagination_state, session_id, role="employer", user_id=eff_user_id)
         requested_page = max(1, (saved_p_state.get("current_page", 1) - 1) if saved_p_state else 1)
 
     if is_pagination_cmd:
         with stage_timer("pagination_branch"):
-            handle_pagination_command(session_id, last_user_msg, role="employer")
-            existing_ctx_dict = get_employer_search_context(session_id, role="employer")
+            await run_in_threadpool(handle_pagination_command, session_id, last_user_msg, role="employer", user_id=eff_user_id)
+            existing_ctx_dict = await run_in_threadpool(get_employer_search_context, session_id, role="employer", user_id=eff_user_id)
             if existing_ctx_dict:
                 try:
                     reqs = EmployerSearchRequirements.parse_obj(existing_ctx_dict)
@@ -210,13 +214,15 @@ async def handle_employer_context(
                         raw_hits = saved_p_state.get("all_candidates")
                     if raw_hits:
                         emp_search_gen = saved_p_state.get("search_gen", 1) if saved_p_state else 1
-                        page_recs, pag_meta_dict, all_recs = recommendation_service.get_paginated_employer_candidate_recommendations(
+                        page_recs, pag_meta_dict, all_recs = await run_in_threadpool(
+                            recommendation_service.get_paginated_employer_candidate_recommendations,
                             employer_reqs=reqs,
                             candidates=raw_hits,
                             page=max(1, requested_page),
                             per_page=MAX_RESULTS,
                             session_id=session_id,
                             search_gen=emp_search_gen,
+                            user_id=eff_user_id,
                         )
                         cands_by_id = {str(h.get("id") or h.get("user_id") or h.get("ccid") or i): h for i, h in enumerate(raw_hits, 1)}
                         all_formatted_card_dicts = EmployerResponseFormatter.format_candidate_cards(all_recs, cands_by_id)
@@ -291,7 +297,7 @@ async def handle_employer_context(
     # -------------------------------------------------------------------------
     if re.search(r'\b(?:reset\s+search|clear\s+search|reset\s+criteria|clear\s+criteria)\b', msg_clean):
         with stage_timer("reset_branch"):
-            reset_search_context(session_id, role="employer")
+            await run_in_threadpool(reset_search_context, session_id, role="employer", user_id=eff_user_id)
             orch_res = OrchestrationResult(
                 role="employer",
                 route_branch="RESET",
@@ -311,7 +317,9 @@ async def handle_employer_context(
     is_knowledge = bool(parsed_k.get("is_knowledge_intent"))
     
     # Step 3a. Recover session context
-    existing_ctx_dict = get_employer_search_context(session_id)
+    existing_ctx_dict = await run_in_threadpool(
+        get_employer_search_context, session_id, role="employer", user_id=eff_user_id
+    )
     existing_reqs = None
     if existing_ctx_dict:
         try:
@@ -384,10 +392,10 @@ async def handle_employer_context(
     set_decision_flags(search_executed=True)
 
     # Step 3c. Phase 5 Atomic CAS Session Persistence
-    update_employer_session_cas(session_id, reqs, prompt_category="ADDITIVE", role="employer")
+    await run_in_threadpool(update_employer_session_cas, session_id, reqs, prompt_category="ADDITIVE", role="employer", user_id=eff_user_id)
 
     # Step 3c-gen. Capture new search generation atomically prior to slow network/retrieval execution
-    cur_employer_search_gen = begin_search_generation(session_id, role="employer") if session_id else 1
+    cur_employer_search_gen = (await run_in_threadpool(begin_search_generation, session_id, role="employer", user_id=eff_user_id)) if session_id else 1
 
     # Step 3d. Search Execution
     try:
@@ -399,6 +407,14 @@ async def handle_employer_context(
         )
     except Exception as e:
         log.exception(f"Employer candidate search execution failed: {e}")
+        err_telemetry = {
+            "search_mode": "CANDIDATE_SEARCH",
+            "search_provider": "meilisearch",
+            "provider_status": "unavailable",
+            "candidate_search_outcome": "provider_failure",
+            "retrieval_attempted": True,
+            "retrieval_error_type": type(e).__name__,
+        }
         orch_res = OrchestrationResult(
             role="employer",
             route_branch="SEARCH",
@@ -406,17 +422,21 @@ async def handle_employer_context(
             section="search",
             status="UNAVAILABLE",
             message="I couldn't complete the candidate search right now.",
+            search_metadata=err_telemetry,
         )
         return compose_final_response(orch_res)
 
     if reqs.safe_failure:
+        telemetry = dict(raw_payload.get("telemetry") or {})
+        if metadata:
+            telemetry.update(metadata.dict())
         orch_res = OrchestrationResult(
             role="employer",
             route_branch="SEARCH",
             db_context=f"## SEARCH STATUS\nFailed to apply requested filter: {reqs.failure_reason}",
             results=None,
             result_type=None,
-            search_metadata=metadata.dict() if metadata else None,
+            search_metadata=telemetry or (metadata.dict() if metadata else None),
             requirements=reqs,
         )
         return compose_final_response(orch_res)
@@ -429,13 +449,19 @@ async def handle_employer_context(
             from services.chip_generator import generate_suggestion_chips  # type: ignore
         employer_fallback_chips = generate_suggestion_chips("employer", reqs, 0, user_location=user_location)
 
+        telemetry = dict(raw_payload.get("telemetry") or {})
+        telemetry["final_count"] = 0
+        telemetry["eligible_count"] = 0
+        if metadata:
+            telemetry.update(metadata.dict())
+
         orch_res = OrchestrationResult(
             role="employer",
             route_branch="SEARCH",
             db_context="Found 0 matches for candidates.",
             results=None,
             result_type=None,
-            search_metadata=metadata.dict() if metadata else None,
+            search_metadata=telemetry or (metadata.dict() if metadata else None),
             requirements=reqs,
             suggestion_chips=employer_fallback_chips,
         )
@@ -443,13 +469,15 @@ async def handle_employer_context(
 
     # Step 3e. Phase 2 Ranking & Presentation Formatting
     # Consumes Phase 2 authoritative ordering without re-sorting
-    page_recs, pag_meta_dict, all_recs = recommendation_service.get_paginated_employer_candidate_recommendations(
+    page_recs, pag_meta_dict, all_recs = await run_in_threadpool(
+        recommendation_service.get_paginated_employer_candidate_recommendations,
         employer_reqs=reqs,
         candidates=raw_hits,
         page=max(1, requested_page),
         per_page=MAX_RESULTS,
         session_id=session_id,
         search_gen=cur_employer_search_gen,
+        user_id=eff_user_id,
     )
 
     cands_by_id = {str(h.get("id") or h.get("user_id") or h.get("ccid") or i): h for i, h in enumerate(raw_hits, 1)}
@@ -523,6 +551,12 @@ async def handle_employer_context(
         from services.chip_generator import generate_suggestion_chips  # type: ignore
     employer_chips = generate_suggestion_chips("employer", reqs, total, user_location=user_location)
 
+    telemetry = dict(raw_payload.get("telemetry") or {})
+    telemetry["final_count"] = len(all_candidate_cards)
+    telemetry["eligible_count"] = len(all_recs)
+    if metadata:
+        telemetry.update(metadata.dict())
+
     orch_res = OrchestrationResult(
         role="employer",
         route_branch="SEARCH",
@@ -532,7 +566,7 @@ async def handle_employer_context(
         allowed_ids=allowed_ids,
         raw_hits=raw_hits,
         pagination=pagination_payload,
-        search_metadata=metadata.dict() if metadata else None,
+        search_metadata=telemetry or (metadata.dict() if metadata else None),
         requirements=reqs,
         suggestion_chips=employer_chips,
     )

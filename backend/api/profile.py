@@ -19,73 +19,72 @@ async def get_missing_fields(req: Request, _token_payload: dict = Depends(verify
     role = req.state.role
     user_type = 1 if role == "employee" else 2
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        c.execute(
-            """
-            SELECT id, email, fname, lname, phone, gender, profile_description, city, state, country
-            FROM cyb_user
-            WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)
-            LIMIT 1
-            """,
-            (email.lower().strip(), user_type)
-        )
-        row = c.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="User profile not found in database.")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT id, email, fname, lname, phone, gender, profile_description, city, state, country
+                FROM cyb_user
+                WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)
+                LIMIT 1
+                """,
+                (email.lower().strip(), user_type)
+            )
+            row = c.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User profile not found in database.")
 
-        missing_fields = []
-        fields_to_check = ["fname", "lname", "phone", "gender", "dob", "profile_description", "city", "state", "country", "expected_salary"]
-        
-        for field in fields_to_check:
-            val = row[field]
-            if val is None:
-                missing_fields.append(field)
-            elif isinstance(val, str) and not val.strip():
-                missing_fields.append(field)
-            elif isinstance(val, int) and val == 0:
-                missing_fields.append(field)
+            missing_fields = []
+            fields_to_check = ["fname", "lname", "phone", "gender", "dob", "profile_description", "city", "state", "country", "expected_salary"]
 
-        if not row.get("profile"):
-            missing_fields.append("profile_image")
+            for field in fields_to_check:
+                val = row[field]
+                if val is None:
+                    missing_fields.append(field)
+                elif isinstance(val, str) and not val.strip():
+                    missing_fields.append(field)
+                elif isinstance(val, int) and val == 0:
+                    missing_fields.append(field)
 
-        if not row.get("resume"):
-            missing_fields.append("resume")
+            if not row.get("profile"):
+                missing_fields.append("profile_image")
 
-        # Also check if skills, education, employment/experience, or certificates are missing
-        c.execute("SELECT COUNT(*) FROM cyb_user_skill WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (row["id"],))
-        skills_cnt = c.fetchone()["COUNT(*)"]
-        if skills_cnt == 0:
-            missing_fields.append("skills")
+            if not row.get("resume"):
+                missing_fields.append("resume")
 
-        c.execute("SELECT COUNT(*) FROM cyb_user_education WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (row["id"],))
-        edu_cnt = c.fetchone()["COUNT(*)"]
-        if edu_cnt == 0:
-            missing_fields.append("education")
+            # Also check if skills, education, employment/experience, or certificates are missing
+            c.execute("SELECT COUNT(*) FROM cyb_user_skill WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (row["id"],))
+            skills_cnt = c.fetchone()["COUNT(*)"]
+            if skills_cnt == 0:
+                missing_fields.append("skills")
 
-        c.execute("SELECT COUNT(*) FROM cyb_user_experience WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (row["id"],))
-        exp_cnt = c.fetchone()["COUNT(*)"]
-        if exp_cnt == 0:
-            missing_fields.append("employment/experience")
+            c.execute("SELECT COUNT(*) FROM cyb_user_education WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (row["id"],))
+            edu_cnt = c.fetchone()["COUNT(*)"]
+            if edu_cnt == 0:
+                missing_fields.append("education")
 
-        c.execute("SELECT COUNT(*) FROM cyb_user_certificate WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (row["id"],))
-        cert_cnt = c.fetchone()["COUNT(*)"]
-        if cert_cnt == 0:
-            missing_fields.append("certifications")
+            c.execute("SELECT COUNT(*) FROM cyb_user_experience WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (row["id"],))
+            exp_cnt = c.fetchone()["COUNT(*)"]
+            if exp_cnt == 0:
+                missing_fields.append("employment/experience")
 
-        return ProfileMissingFieldsResponse(
-            user_id=row["id"],
-            email=row["email"],
-            missing_fields=missing_fields,
-            profile_complete=len(missing_fields) == 0
-        )
+            c.execute("SELECT COUNT(*) FROM cyb_user_certificate WHERE user = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)", (row["id"],))
+            cert_cnt = c.fetchone()["COUNT(*)"]
+            if cert_cnt == 0:
+                missing_fields.append("certifications")
+
+            return ProfileMissingFieldsResponse(
+                user_id=row["id"],
+                email=row["email"],
+                missing_fields=missing_fields,
+                profile_complete=len(missing_fields) == 0
+            )
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in get_missing_fields: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while fetching profile fields.")
 
 @router.put("/update")
 async def update_profile(
@@ -121,45 +120,43 @@ async def update_profile(
         return {"success": True, "message": "No profile fields to update."}
 
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        # Check if user exists
-        c.execute(
-            "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-            (email.lower().strip(), user_type)
-        )
-        user = c.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User profile not found in database.")
+        with get_db() as conn:
+            c = conn.cursor()
+            # Check if user exists
+            c.execute(
+                "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                (email.lower().strip(), user_type)
+            )
+            user = c.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User profile not found in database.")
 
-        # Build dynamic query
-        set_clauses = []
-        params = []
-        for key, val in update_data.items():
-            set_clauses.append(f"{key} = %s")
-            params.append(val)
-        
-        # Add email and user_type for WHERE clause
-        params.extend([email.lower().strip(), user_type])
-        
-        query = f"""
-            UPDATE cyb_user
-            SET {', '.join(set_clauses)}, modify_date = NOW()
-            WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)
-        """
-        
-        c.execute(query, params)
-        conn.commit()
-        
-        return {"success": True, "message": "Profile updated successfully.", "updated_fields": list(update_data.keys())}
+            # Build dynamic query
+            set_clauses = []
+            params = []
+            for key, val in update_data.items():
+                set_clauses.append(f"{key} = %s")
+                params.append(val)
+
+            # Add email and user_type for WHERE clause
+            params.extend([email.lower().strip(), user_type])
+
+            query = f"""
+                UPDATE cyb_user
+                SET {', '.join(set_clauses)}, modify_date = NOW()
+                WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)
+            """
+
+            c.execute(query, params)
+            conn.commit()
+
+            return {"success": True, "message": "Profile updated successfully.", "updated_fields": list(update_data.keys())}
     except Exception as e:
-        conn.rollback()
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in update_profile: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while updating profile.")
 
 
 @router.put("/address")
@@ -261,50 +258,48 @@ async def update_address(
             "profile_link": profile_link
         }
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        c.execute(
-            "SELECT id, present_address, permanent_address FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-            (email.lower().strip(), user_type)
-        )
-        user = c.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User profile not found in database.")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id, present_address, permanent_address FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                (email.lower().strip(), user_type)
+            )
+            user = c.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User profile not found in database.")
 
-        # If same_address flag set to 1 without explicit text, copy from existing DB record
-        if db_updates.get("same_address") == 1:
-            curr_pres = db_updates.get("present_address") or user["present_address"]
-            if curr_pres:
-                db_updates["present_address"] = curr_pres
-                db_updates["permanent_address"] = curr_pres
+            # If same_address flag set to 1 without explicit text, copy from existing DB record
+            if db_updates.get("same_address") == 1:
+                curr_pres = db_updates.get("present_address") or user["present_address"]
+                if curr_pres:
+                    db_updates["present_address"] = curr_pres
+                    db_updates["permanent_address"] = curr_pres
 
-        set_clauses = [f"{k} = %s" for k in db_updates.keys()]
-        params = list(db_updates.values())
-        params.extend([email.lower().strip(), user_type])
+            set_clauses = [f"{k} = %s" for k in db_updates.keys()]
+            params = list(db_updates.values())
+            params.extend([email.lower().strip(), user_type])
 
-        query = f"""
-            UPDATE cyb_user
-            SET {', '.join(set_clauses)}, modify_date = NOW()
-            WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)
-        """
+            query = f"""
+                UPDATE cyb_user
+                SET {', '.join(set_clauses)}, modify_date = NOW()
+                WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0)
+            """
 
-        c.execute(query, params)
-        conn.commit()
+            c.execute(query, params)
+            conn.commit()
 
-        return {
-            "success": True,
-            "message": f"Address updated successfully. You can view your updated address profile here: {profile_link}",
-            "updated_fields": list(db_updates.keys()),
-            "profile_link": profile_link
-        }
+            return {
+                "success": True,
+                "message": f"Address updated successfully. You can view your updated address profile here: {profile_link}",
+                "updated_fields": list(db_updates.keys()),
+                "profile_link": profile_link
+            }
     except Exception as e:
-        conn.rollback()
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in update_address: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while updating address.")
 
 
 @router.get("/skills")
@@ -316,44 +311,43 @@ async def get_user_skills(
     role = req.state.role
     user_type = 1 if role == "employee" else 2
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        c.execute(
-            "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-            (email.lower().strip(), user_type)
-        )
-        user = c.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User profile not found.")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                (email.lower().strip(), user_type)
+            )
+            user = c.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User profile not found.")
 
-        user_id = user["id"]
-        c.execute(
-            """
-            SELECT us.id as user_skill_id, us.skill as skill_id, s.name as skill_name, us.rating
-            FROM cyb_user_skill us
-            JOIN cyb_skill s ON us.skill = s.id
-            WHERE us.user = %s AND us.status = 1 AND (us.is_deleted IS NULL OR us.is_deleted = 0)
-            """,
-            (user_id,)
-        )
-        rows = c.fetchall()
-        skills_list = []
-        for r in rows:
-            skills_list.append({
-                "user_skill_id": r["user_skill_id"],
-                "skill_id": r["skill_id"],
-                "skill_name": r["skill_name"],
-                "rating": r["rating"]
-            })
+            user_id = user["id"]
+            c.execute(
+                """
+                SELECT us.id as user_skill_id, us.skill as skill_id, s.name as skill_name, us.rating
+                FROM cyb_user_skill us
+                JOIN cyb_skill s ON us.skill = s.id
+                WHERE us.user = %s AND us.status = 1 AND (us.is_deleted IS NULL OR us.is_deleted = 0)
+                """,
+                (user_id,)
+            )
+            rows = c.fetchall()
+            skills_list = []
+            for r in rows:
+                skills_list.append({
+                    "user_skill_id": r["user_skill_id"],
+                    "skill_id": r["skill_id"],
+                    "skill_name": r["skill_name"],
+                    "rating": r["rating"]
+                })
 
-        return {"success": True, "skills": skills_list}
+            return {"success": True, "skills": skills_list}
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in get_user_skills: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while fetching skills.")
 
 
 @router.post("/skills")
@@ -374,63 +368,61 @@ async def add_user_skills(
     except ModuleNotFoundError:
         from services.profile_parser import resolve_or_create_skill_id  # type: ignore
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        c.execute(
-            "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-            (email.lower().strip(), user_type)
-        )
-        user = c.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User profile not found.")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                (email.lower().strip(), user_type)
+            )
+            user = c.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User profile not found.")
 
-        user_id = user["id"]
-        added_skills = []
-        rating = request.rating or 5
+            user_id = user["id"]
+            added_skills = []
+            rating = request.rating or 5
 
-        for item in request.skills:
-            resolved = resolve_or_create_skill_id(item)
-            if resolved:
-                sk_id = resolved["skill_id"]
-                sk_name = resolved["skill_name"]
+            for item in request.skills:
+                resolved = resolve_or_create_skill_id(item)
+                if resolved:
+                    sk_id = resolved["skill_id"]
+                    sk_name = resolved["skill_name"]
 
-                # Check if user already has this skill
-                c.execute(
-                    "SELECT id FROM cyb_user_skill WHERE user = %s AND skill = %s AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-                    (user_id, sk_id)
-                )
-                existing = c.fetchone()
-                if not existing:
+                    # Check if user already has this skill
                     c.execute(
-                        "INSERT INTO cyb_user_skill (user, skill, rating, status, is_deleted, create_date) VALUES (%s, %s, %s, 1, 0, NOW())",
-                        (user_id, sk_id, rating)
+                        "SELECT id FROM cyb_user_skill WHERE user = %s AND skill = %s AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                        (user_id, sk_id)
                     )
-                else:
-                    # Update status to active if soft-deleted
-                    c.execute(
-                        "UPDATE cyb_user_skill SET status = 1, is_deleted = 0, rating = %s, modify_date = NOW() WHERE id = %s",
-                        (rating, existing["id"])
-                    )
+                    existing = c.fetchone()
+                    if not existing:
+                        c.execute(
+                            "INSERT INTO cyb_user_skill (user, skill, rating, status, is_deleted, create_date) VALUES (%s, %s, %s, 1, 0, NOW())",
+                            (user_id, sk_id, rating)
+                        )
+                    else:
+                        # Update status to active if soft-deleted
+                        c.execute(
+                            "UPDATE cyb_user_skill SET status = 1, is_deleted = 0, rating = %s, modify_date = NOW() WHERE id = %s",
+                            (rating, existing["id"])
+                        )
 
-                added_skills.append({"skill_id": sk_id, "skill_name": sk_name, "rating": rating})
+                    added_skills.append({"skill_id": sk_id, "skill_name": sk_name, "rating": rating})
 
-        conn.commit()
-        profile_link = "https://www.collarcheck.com/dashboard/user/profile?tab=skills"
+            conn.commit()
+            profile_link = "https://www.collarcheck.com/dashboard/user/profile?tab=skills"
 
-        return {
-            "success": True,
-            "message": f"Successfully added/updated {len(added_skills)} skill(s). View your profile skills here: {profile_link}",
-            "added_skills": added_skills,
-            "profile_link": profile_link
-        }
+            return {
+                "success": True,
+                "message": f"Successfully added/updated {len(added_skills)} skill(s). View your profile skills here: {profile_link}",
+                "added_skills": added_skills,
+                "profile_link": profile_link
+            }
     except Exception as e:
-        conn.rollback()
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in add_user_skills: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while adding skills.")
 
 
 @router.get("/education")
@@ -442,55 +434,54 @@ async def get_user_education(
     role = req.state.role
     user_type = 1 if role == "employee" else 2
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        c.execute(
-            "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-            (email.lower().strip(), user_type)
-        )
-        user = c.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User profile not found.")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                (email.lower().strip(), user_type)
+            )
+            user = c.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User profile not found.")
 
-        user_id = user["id"]
-        c.execute(
-            """
-            SELECT e.id, inst.name as university_name, crs.name as course_name, e.course_type, e.ishighest, e.starting_date, e.ending_date, e.ongoing, ct.name as city_name, st.name as state_name, cnt.name as country_name
-            FROM cyb_user_education e
-            LEFT JOIN cyb_institutions inst ON e.university = inst.id
-            LEFT JOIN cyb_courses crs ON e.course = crs.id
-            LEFT JOIN cyb_cities ct ON e.city = ct.id
-            LEFT JOIN cyb_state st ON e.state = st.id
-            LEFT JOIN cyb_country cnt ON e.country = cnt.id
-            WHERE e.user = %s AND e.status = 1 AND (e.is_deleted IS NULL OR e.is_deleted = 0)
-            """,
-            (user_id,)
-        )
-        rows = c.fetchall()
-        edu_list = []
-        for r in rows:
-            edu_list.append({
-                "id": r["id"],
-                "university": r["university_name"],
-                "course": r["course_name"],
-                "course_type": "Full Time" if r["course_type"] == 1 else "Online",
-                "starting_date": r["starting_date"],
-                "ending_date": r["ending_date"],
-                "ongoing": r["ongoing"],
-                "ishighest": r["ishighest"],
-                "city": r["city_name"],
-                "state": r["state_name"],
-                "country": r["country_name"]
-            })
+            user_id = user["id"]
+            c.execute(
+                """
+                SELECT e.id, inst.name as university_name, crs.name as course_name, e.course_type, e.ishighest, e.starting_date, e.ending_date, e.ongoing, ct.name as city_name, st.name as state_name, cnt.name as country_name
+                FROM cyb_user_education e
+                LEFT JOIN cyb_institutions inst ON e.university = inst.id
+                LEFT JOIN cyb_courses crs ON e.course = crs.id
+                LEFT JOIN cyb_cities ct ON e.city = ct.id
+                LEFT JOIN cyb_state st ON e.state = st.id
+                LEFT JOIN cyb_country cnt ON e.country = cnt.id
+                WHERE e.user = %s AND e.status = 1 AND (e.is_deleted IS NULL OR e.is_deleted = 0)
+                """,
+                (user_id,)
+            )
+            rows = c.fetchall()
+            edu_list = []
+            for r in rows:
+                edu_list.append({
+                    "id": r["id"],
+                    "university": r["university_name"],
+                    "course": r["course_name"],
+                    "course_type": "Full Time" if r["course_type"] == 1 else "Online",
+                    "starting_date": r["starting_date"],
+                    "ending_date": r["ending_date"],
+                    "ongoing": r["ongoing"],
+                    "ishighest": r["ishighest"],
+                    "city": r["city_name"],
+                    "state": r["state_name"],
+                    "country": r["country_name"]
+                })
 
-        return {"success": True, "education": edu_list}
+            return {"success": True, "education": edu_list}
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in get_user_education: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while fetching education.")
 
 
 @router.put("/education")
@@ -522,63 +513,61 @@ async def add_user_education(
             resolve_city_details,
         )
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        c.execute(
-            "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-            (email.lower().strip(), user_type)
-        )
-        user = c.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User profile not found.")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                (email.lower().strip(), user_type)
+            )
+            user = c.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User profile not found.")
 
-        u_id = user["id"]
+            u_id = user["id"]
 
-        univ_id = resolve_or_create_institution_id(request.university, user_id=u_id)["institution_id"] if request.university else None
-        course_id = resolve_or_create_course_id(request.course, user_id=u_id)["course_id"] if request.course else None
+            univ_id = resolve_or_create_institution_id(request.university, user_id=u_id)["institution_id"] if request.university else None
+            course_id = resolve_or_create_course_id(request.course, user_id=u_id)["course_id"] if request.course else None
 
-        c_type = request.course_type
-        course_type_val = 2 if c_type in (2, 0, "2", "0", "Online") else 1
+            c_type = request.course_type
+            course_type_val = 2 if c_type in (2, 0, "2", "0", "Online") else 1
 
-        country_id = resolve_country_id(request.country) if isinstance(request.country, str) else request.country
-        state_id = resolve_state_id(request.state) if isinstance(request.state, str) else request.state
-        city_id = None
-        if isinstance(request.city, str) and request.city.strip():
-            c_details = resolve_city_details(request.city)
-            if c_details:
-                city_id = c_details["city_id"]
-                if c_details.get("state_id") and not state_id:
-                    state_id = c_details["state_id"]
-            else:
-                city_id = resolve_city_id(request.city, state_id)
-        elif isinstance(request.city, int):
-            city_id = request.city
+            country_id = resolve_country_id(request.country) if isinstance(request.country, str) else request.country
+            state_id = resolve_state_id(request.state) if isinstance(request.state, str) else request.state
+            city_id = None
+            if isinstance(request.city, str) and request.city.strip():
+                c_details = resolve_city_details(request.city)
+                if c_details:
+                    city_id = c_details["city_id"]
+                    if c_details.get("state_id") and not state_id:
+                        state_id = c_details["state_id"]
+                else:
+                    city_id = resolve_city_id(request.city, state_id)
+            elif isinstance(request.city, int):
+                city_id = request.city
 
-        ishighest_val = 1 if request.ishighest in (1, True, "1", "yes") else 0
+            ishighest_val = 1 if request.ishighest in (1, True, "1", "yes") else 0
 
-        if ishighest_val == 1:
-            c.execute("UPDATE cyb_user_education SET ishighest = 0 WHERE user = %s", (u_id,))
+            if ishighest_val == 1:
+                c.execute("UPDATE cyb_user_education SET ishighest = 0 WHERE user = %s", (u_id,))
 
-        c.execute(
-            """
-            INSERT INTO cyb_user_education 
-            (user, university, course, course_type, country, state, city, ishighest, starting_date, ending_date, ongoing, status, is_deleted, create_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 0, NOW())
-            """,
-            (u_id, univ_id, course_id, course_type_val, country_id, state_id, city_id, ishighest_val, request.starting_date, request.ending_date, request.ongoing)
-        )
-        conn.commit()
+            c.execute(
+                """
+                INSERT INTO cyb_user_education
+                (user, university, course, course_type, country, state, city, ishighest, starting_date, ending_date, ongoing, status, is_deleted, create_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 0, NOW())
+                """,
+                (u_id, univ_id, course_id, course_type_val, country_id, state_id, city_id, ishighest_val, request.starting_date, request.ending_date, request.ongoing)
+            )
+            conn.commit()
 
-        profile_link = "https://www.collarcheck.com/dashboard/user/profile?tab=education"
-        return {"success": True, "message": f"Education record added/updated successfully. View profile: {profile_link}", "profile_link": profile_link}
+            profile_link = "https://www.collarcheck.com/dashboard/user/profile?tab=education"
+            return {"success": True, "message": f"Education record added/updated successfully. View profile: {profile_link}", "profile_link": profile_link}
     except Exception as e:
-        conn.rollback()
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in add_user_education: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while adding education.")
 
 
 @router.get("/employment")
@@ -590,62 +579,61 @@ async def get_user_employment(
     role = req.state.role
     user_type = 1 if role == "employee" else 2
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        c.execute(
-            "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-            (email.lower().strip(), user_type)
-        )
-        user = c.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User profile not found.")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                (email.lower().strip(), user_type)
+            )
+            user = c.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User profile not found.")
 
-        user_id = user["id"]
-        c.execute(
-            """
-            SELECT e.id, e.company, d.name as designation_name, dept.name as department_name, et.name as emp_type_name, e.joining_date, e.worked_till_date, e.still_working, e.salary, e.salary_inhand, e.salary_mode, e.description, e.hired
-            FROM cyb_user_experience e
-            LEFT JOIN cyb_designation d ON e.designation = d.id
-            LEFT JOIN cyb_department dept ON e.department = dept.id
-            LEFT JOIN cyb_employement_type et ON e.employment_type = et.id
-            WHERE e.user = %s AND e.status = 1 AND (e.is_deleted IS NULL OR e.is_deleted = 0)
-            """,
-            (user_id,)
-        )
-        rows = c.fetchall()
-        emp_list = []
-        for r in rows:
-            c_val = r["company"] or ""
-            if str(c_val).isdigit():
-                c.execute("SELECT fname, lname FROM cyb_user WHERE id = %s LIMIT 1", (int(c_val),))
-                comp_u = c.fetchone()
-                if comp_u:
-                    c_val = f"{comp_u['fname'] or ''} {comp_u['lname'] or ''}".strip()
+            user_id = user["id"]
+            c.execute(
+                """
+                SELECT e.id, e.company, d.name as designation_name, dept.name as department_name, et.name as emp_type_name, e.joining_date, e.worked_till_date, e.still_working, e.salary, e.salary_inhand, e.salary_mode, e.description, e.hired
+                FROM cyb_user_experience e
+                LEFT JOIN cyb_designation d ON e.designation = d.id
+                LEFT JOIN cyb_department dept ON e.department = dept.id
+                LEFT JOIN cyb_employement_type et ON e.employment_type = et.id
+                WHERE e.user = %s AND e.status = 1 AND (e.is_deleted IS NULL OR e.is_deleted = 0)
+                """,
+                (user_id,)
+            )
+            rows = c.fetchall()
+            emp_list = []
+            for r in rows:
+                c_val = r["company"] or ""
+                if str(c_val).isdigit():
+                    c.execute("SELECT fname, lname FROM cyb_user WHERE id = %s LIMIT 1", (int(c_val),))
+                    comp_u = c.fetchone()
+                    if comp_u:
+                        c_val = f"{comp_u['fname'] or ''} {comp_u['lname'] or ''}".strip()
 
-            emp_list.append({
-                "id": r["id"],
-                "company": c_val,
-                "designation": r["designation_name"],
-                "department": r["department_name"],
-                "employment_type": r["emp_type_name"],
-                "joining_date": r["joining_date"],
-                "worked_till_date": r["worked_till_date"],
-                "still_working": r["still_working"],
-                "salary": r["salary"],
-                "salary_inhand": r["salary_inhand"],
-                "salary_mode": r["salary_mode"],
-                "description": r["description"],
-                "hired": r["hired"]
-            })
+                emp_list.append({
+                    "id": r["id"],
+                    "company": c_val,
+                    "designation": r["designation_name"],
+                    "department": r["department_name"],
+                    "employment_type": r["emp_type_name"],
+                    "joining_date": r["joining_date"],
+                    "worked_till_date": r["worked_till_date"],
+                    "still_working": r["still_working"],
+                    "salary": r["salary"],
+                    "salary_inhand": r["salary_inhand"],
+                    "salary_mode": r["salary_mode"],
+                    "description": r["description"],
+                    "hired": r["hired"]
+                })
 
-        return {"success": True, "employment": emp_list}
+            return {"success": True, "employment": emp_list}
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in get_user_employment: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while fetching employment history.")
 
 
 @router.put("/employment")
@@ -675,51 +663,49 @@ async def add_user_employment(
             resolve_or_create_skill_id,
         )
 
-    conn = get_db()
-    c = conn.cursor()
     try:
-        c.execute(
-            "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
-            (email.lower().strip(), user_type)
-        )
-        user = c.fetchone()
-        if not user:
-            raise HTTPException(status_code=404, detail="User profile not found.")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id FROM cyb_user WHERE LOWER(email) = %s AND user_type = %s AND status = 1 AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+                (email.lower().strip(), user_type)
+            )
+            user = c.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User profile not found.")
 
-        u_id = user["id"]
+            u_id = user["id"]
 
-        comp_val = resolve_company_id(request.company) or request.company or ""
-        desig_id = resolve_or_create_designation_id(request.designation, user_id=u_id)["designation_id"] if request.designation else None
-        dept_id = resolve_or_create_department_id(request.department, user_id=u_id)["department_id"] if request.department else None
-        emp_type_id = resolve_employment_type_id(request.employment_type)
+            comp_val = resolve_company_id(request.company) or request.company or ""
+            desig_id = resolve_or_create_designation_id(request.designation, user_id=u_id)["designation_id"] if request.designation else None
+            dept_id = resolve_or_create_department_id(request.department, user_id=u_id)["department_id"] if request.department else None
+            emp_type_id = resolve_employment_type_id(request.employment_type)
 
-        skill_ids_list = []
-        if request.skill:
-            for sk in request.skill:
-                res_sk = resolve_or_create_skill_id(sk)
-                if res_sk:
-                    skill_ids_list.append(str(res_sk["skill_id"]))
-        skill_json_str = json.dumps(skill_ids_list) if skill_ids_list else None
+            skill_ids_list = []
+            if request.skill:
+                for sk in request.skill:
+                    res_sk = resolve_or_create_skill_id(sk)
+                    if res_sk:
+                        skill_ids_list.append(str(res_sk["skill_id"]))
+            skill_json_str = json.dumps(skill_ids_list) if skill_ids_list else None
 
-        c.execute(
-            """
-            INSERT INTO cyb_user_experience
-            (user, company, designation, department, employment_type, joining_date, worked_till_date, still_working, hired, description, salary, salary_inhand, salary_mode, skill, status, is_deleted, create_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 0, NOW())
-            """,
-            (u_id, str(comp_val), desig_id, dept_id, emp_type_id, request.joining_date, request.worked_till_date, request.still_working or 0, request.hired or 0, request.description or "", str(request.salary) if request.salary else None, request.salary_inhand or "CTC", request.salary_mode or "Annually", skill_json_str)
-        )
-        conn.commit()
+            c.execute(
+                """
+                INSERT INTO cyb_user_experience
+                (user, company, designation, department, employment_type, joining_date, worked_till_date, still_working, hired, description, salary, salary_inhand, salary_mode, skill, status, is_deleted, create_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 0, NOW())
+                """,
+                (u_id, str(comp_val), desig_id, dept_id, emp_type_id, request.joining_date, request.worked_till_date, request.still_working or 0, request.hired or 0, request.description or "", str(request.salary) if request.salary else None, request.salary_inhand or "CTC", request.salary_mode or "Annually", skill_json_str)
+            )
+            conn.commit()
 
-        profile_link = "https://www.collarcheck.com/dashboard/user/profile?tab=experience"
-        return {"success": True, "message": f"Employment experience record added/updated successfully. View profile: {profile_link}", "profile_link": profile_link}
+            profile_link = "https://www.collarcheck.com/dashboard/user/profile?tab=experience"
+            return {"success": True, "message": f"Employment experience record added/updated successfully. View profile: {profile_link}", "profile_link": profile_link}
     except Exception as e:
-        conn.rollback()
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        conn.close()
+        log.exception("Database error in add_user_employment: %s", e)
+        raise HTTPException(status_code=500, detail="Database error occurred while adding employment experience.")
 
 
 

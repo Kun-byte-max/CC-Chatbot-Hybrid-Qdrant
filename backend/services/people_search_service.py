@@ -1,3 +1,4 @@
+import time
 from typing import List, Dict, Any, Optional
 import logging
 
@@ -68,6 +69,7 @@ class PeopleSearchService:
         """
         Executes People Search using criteria, resolving NEAR_ME and EXPLICIT locations.
         """
+        t0 = time.perf_counter()
         city_id = None
         state_id = None
         resolved_loc_name = criteria.location
@@ -81,6 +83,17 @@ class PeopleSearchService:
                 resolved_raw_loc = user_location.strip()
 
             if not resolved_raw_loc:
+                telemetry = {
+                    "search_mode": "PEOPLE_SEARCH",
+                    "search_provider": "people_repo",
+                    "provider_status": "skipped",
+                    "people_search_outcome": "location_unavailable",
+                    "retrieval_attempted": False,
+                    "retrieval_result_count": 0,
+                    "eligible_count": 0,
+                    "final_count": 0,
+                    "retrieval_total_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+                }
                 return {
                     "success": True,
                     "status": "LOCATION_UNAVAILABLE",
@@ -92,6 +105,7 @@ class PeopleSearchService:
                     ),
                     "results": [],
                     "result_type": "people_location_unavailable",
+                    "search_metadata": telemetry,
                 }
 
             loc_res: LocationResult = resolve_location_from_db(resolved_raw_loc)
@@ -108,9 +122,42 @@ class PeopleSearchService:
                 resolved_loc_name = loc_res.city_name or loc_res.state_name or criteria.location
             else:
                 # Unresolved explicit location query (Zero hits to prevent location leakage)
-                return PeopleSearchService._format_empty_response(criteria, unresolved_location=criteria.location)
+                telemetry = {
+                    "search_mode": "PEOPLE_SEARCH",
+                    "search_provider": "people_repo",
+                    "provider_status": "skipped",
+                    "people_search_outcome": "location_unavailable",
+                    "retrieval_attempted": False,
+                    "retrieval_result_count": 0,
+                    "eligible_count": 0,
+                    "final_count": 0,
+                    "retrieval_total_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+                }
+                return PeopleSearchService._format_empty_response(
+                    criteria, unresolved_location=criteria.location, telemetry=telemetry
+                )
+
+        # Categorical applied filters for telemetry (categories only, never raw filter values)
+        applied_filters = []
+        if city_id:
+            applied_filters.append("city")
+        elif state_id:
+            applied_filters.append("state")
+        if criteria.company:
+            applied_filters.append("company")
+        if criteria.experience_min is not None or criteria.experience_max is not None:
+            applied_filters.append("experience")
+            if criteria.experience_min is not None:
+                applied_filters.append("experience_min")
+            if criteria.experience_max is not None:
+                applied_filters.append("experience_max")
+        if criteria.title:
+            applied_filters.append("role_type")
+        if criteria.candidate_name or criteria.skills:
+            applied_filters.append("keyword")
 
         # Query database repository for evaluation pool (Limit 100)
+        t_repo0 = time.perf_counter()
         raw_people = PeopleRepository.search_people(
             skills=criteria.skills,
             title=criteria.title,
@@ -121,9 +168,25 @@ class PeopleSearchService:
             name=criteria.candidate_name,
             limit=100,
         )
+        repo_ms = round((time.perf_counter() - t_repo0) * 1000.0, 1)
 
         if not raw_people:
-            return PeopleSearchService._format_empty_response(criteria, resolved_location=resolved_loc_name)
+            telemetry = {
+                "search_mode": "PEOPLE_SEARCH",
+                "search_provider": "people_repo",
+                "provider_status": "empty",
+                "people_search_outcome": "empty_results",
+                "retrieval_attempted": True,
+                "retrieval_result_count": 0,
+                "eligible_count": 0,
+                "final_count": 0,
+                "retrieval_total_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+                "filters_applied": applied_filters,
+                "provider_latency_ms": {"people_repo": repo_ms},
+            }
+            return PeopleSearchService._format_empty_response(
+                criteria, resolved_location=resolved_loc_name, telemetry=telemetry
+            )
 
         from backend.services.people_scoring_engine import EmployeePeopleScoringEngine, people_rank_key
 
@@ -187,8 +250,27 @@ class PeopleSearchService:
             if len(people_cards) >= 50:
                 break
 
+        eligible_count = sum(1 for p, scoring in scored_pairs if scoring.get("is_eligible", True))
+
         if not people_cards:
-            return PeopleSearchService._format_empty_response(criteria, resolved_location=resolved_loc_name)
+            telemetry = {
+                "search_mode": "PEOPLE_SEARCH",
+                "search_provider": "people_repo",
+                "provider_status": "empty",
+                "people_search_outcome": "empty_results",
+                "retrieval_attempted": True,
+                "retrieval_result_count": len(raw_people),
+                "eligible_count": eligible_count,
+                "final_count": 0,
+                "retrieval_total_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+                "filters_applied": applied_filters,
+                "provider_latency_ms": {"people_repo": repo_ms},
+            }
+            if criteria.experience_min is not None or criteria.experience_max is not None:
+                telemetry["experience_rejected_count"] = max(0, len(raw_people) - eligible_count)
+            return PeopleSearchService._format_empty_response(
+                criteria, resolved_location=resolved_loc_name, telemetry=telemetry
+            )
 
         count = len(people_cards)
         loc_label = f" in {resolved_loc_name}" if resolved_loc_name else ""
@@ -224,6 +306,22 @@ class PeopleSearchService:
             "ranked_jobs": people_cards,
         }
 
+        telemetry = {
+            "search_mode": "PEOPLE_SEARCH",
+            "search_provider": "people_repo",
+            "provider_status": "success",
+            "people_search_outcome": "success_with_results",
+            "retrieval_attempted": True,
+            "retrieval_result_count": len(raw_people),
+            "eligible_count": eligible_count,
+            "final_count": count,
+            "retrieval_total_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+            "filters_applied": applied_filters,
+            "provider_latency_ms": {"people_repo": repo_ms},
+        }
+        if criteria.experience_min is not None or criteria.experience_max is not None:
+            telemetry["experience_rejected_count"] = max(0, len(raw_people) - eligible_count)
+
         return {
             "success": True,
             "status": "SUCCESS",
@@ -234,13 +332,15 @@ class PeopleSearchService:
             "result_type": "people",
             "pagination": pagination_payload,
             "raw_hits": [pair[0] for pair in scored_pairs[:count]],
+            "search_metadata": telemetry,
         }
 
     @staticmethod
     def _format_empty_response(
         criteria: SearchCriteria,
         resolved_location: Optional[str] = None,
-        unresolved_location: Optional[str] = None
+        unresolved_location: Optional[str] = None,
+        telemetry: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Formats conversational empty result response without returning raw []."""
         search_terms = []
@@ -262,7 +362,7 @@ class PeopleSearchService:
             "Inform the user in one sentence that no professionals were found matching their request and suggest broadening their search criteria."
         )
 
-        return {
+        resp = {
             "success": True,
             "status": "NO_HITS",
             "db_context": db_context_str,
@@ -270,3 +370,6 @@ class PeopleSearchService:
             "result_type": "people_search_empty",
             "suggestion_chips": ["Search Jobs", "Companies Near Me", "Clear Filters"],
         }
+        if telemetry is not None:
+            resp["search_metadata"] = telemetry
+        return resp

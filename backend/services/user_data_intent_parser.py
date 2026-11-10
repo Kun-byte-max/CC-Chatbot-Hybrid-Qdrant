@@ -146,12 +146,65 @@ Return ONLY a raw JSON list of matching intent strings, e.g. ["EMPLOYMENT_HISTOR
     return []
 
 
+def is_third_person_query(text: str) -> bool:
+    """
+    Deterministically determines if a query is a third-person candidate/people query
+    (e.g., "What are Kunal's skills?", "Show me Priya Sharma", "candidates with python").
+    Such queries must never be classified as the logged-in user's profile/data intents.
+    """
+    if not text or not text.strip():
+        return False
+
+    raw = text.lower().strip()
+    # Pre-normalize high-value candidate/people entity typos
+    raw = re.sub(r"\bcandidtes?\b", "candidates", raw)
+    raw = re.sub(r"\bcandidte\b", "candidate", raw)
+    raw = re.sub(r"\bemplyees?\b", "employees", raw)
+    raw = re.sub(r"\bemplyee\b", "employee", raw)
+    raw = re.sub(r"\bprofesionals?\b", "professionals", raw)
+    raw = re.sub(r"\bprofesional\b", "professional", raw)
+    raw = re.sub(r"\bdevelprs?\b", "developers", raw)
+    raw = re.sub(r"\bdevelpr\b", "developer", raw)
+    raw = re.sub(r"\benginees?\b", "engineers", raw)
+
+    # Check if prompt explicitly targets third-party people entities
+    has_people_entity = bool(re.search(
+        r"\b(employees?|candidates?|developers?|engineers?|people|person|profiles?|professionals?|recruits?|applicants?|staff|workers?|users?|who|someone|anyone)\b",
+        raw
+    ))
+
+    # Imperative delivery phrasing vs self-profile ownership
+    is_imperative_delivery = bool(re.search(r"\b(give|show|find|send|get|list|fetch|suggest|recommend|search(\s+for)?|look(\s+for)?)\s+me\b", raw))
+    has_explicit_my = bool(re.search(r"\b(my|mine|myself|i)\b", raw))
+
+    # 1. Possessive name query (e.g., "Kunal's profile", "Priya's skills")
+    is_possessive_name_query = bool(re.search(r"\b[a-z]+['’]s\s+(profile|skil*s?|educat(io|ion)?|summary|history|experience)\b", raw))
+
+    # 2. Third-person subject with filter/skill context
+    is_people_entity_query = has_people_entity and bool(re.search(
+        r"\b(employees?|candidates?|developers?|engineers?|people|person|profiles?|professionals?|recruits?|applicants?|staff|workers?|users?|who|someone|anyone)\b.*?\b(with|wth|wit|skilled|having|knowing|expert|proficient|specializing|using|as\s+a\s+skill|asa?\s+programming\s+skill|experience|skills?)\b",
+        raw
+    )) and not has_explicit_my
+
+    # 3. Direct search verbs targeting a third-person entity (non-job, non-self)
+    is_third_person_search_verb = (
+        bool(re.search(r"\b(find|search(\s+for)?|show(\s+me)?|give(\s+me)?|look\s+for|get(\s+me)?|list|fetch|suggest(\s+me)?|recommend(\s+me)?)\s+(?:all\s+)?(employees?|candidates?|developers?|engineers?|people|person|profiles?|professionals?|users?|[a-z]+)\b", raw))
+        and not has_explicit_my
+        and not bool(re.search(r"\b(jobs?|roles?|vacanc|openings?)\b", raw))
+    )
+
+    return is_possessive_name_query or is_people_entity_query or is_third_person_search_verb
+
+
 async def parse_user_data_intents_async(text: str) -> List[UserIntent]:
     """
     Native async intent parser.
     First runs ultra-fast deterministic intent parsing; if no match and text is conversational,
-    awaits LLM-driven intent parsing.
+    awaits LLM-driven intent parsing unless query is a third-person query.
     """
+    if is_third_person_query(text):
+        return []
+
     res = parse_user_data_intents_deterministic(text)
     if res:
         return res
@@ -169,8 +222,11 @@ def parse_user_data_intents(text: str) -> List[UserIntent]:
     Centralized Hybrid Intent Parser (Sync interface).
     First runs ultra-fast deterministic intent parsing.
     If no match and an event loop is running, returns deterministic result to avoid nesting event loops;
-    otherwise executes asyncio.run for non-async callers.
+    otherwise executes asyncio.run for non-async callers unless query is a third-person query.
     """
+    if is_third_person_query(text):
+        return []
+
     import asyncio
     res = parse_user_data_intents_deterministic(text)
     if res:
@@ -203,6 +259,9 @@ def parse_user_data_intents_deterministic(text: str) -> List[UserIntent]:
     if not text or not text.strip():
         return []
 
+    if is_third_person_query(text):
+        return []
+
     raw = text.lower().strip()
 
     # Pre-normalize high-value candidate/people entity typos before applying intent rules
@@ -228,27 +287,6 @@ def parse_user_data_intents_deterministic(text: str) -> List[UserIntent]:
     
     has_explicit_my = bool(re.search(r"\b(my|mine|myself|i)\b", raw))
     has_self_ownership = has_explicit_my or (bool(re.search(r"\bme\b", raw)) and not is_imperative_delivery and not has_people_entity)
-
-    # Dynamic third-person candidate / people search detection:
-    # 1. Possessive name query (e.g., "Kunal's profile", "Priya's skills")
-    # 2. Third-person subject (employees, candidates, developers, engineers, etc.) with filter/skill context
-    # 3. Direct search verbs targeting a third-person entity (non-job, non-self)
-    is_possessive_name_query = bool(re.search(r"\b[a-z]+['’]s\s+(profile|skil*s?|educat(io|ion)?|summary|history|experience)\b", raw))
-    
-    is_people_entity_query = has_people_entity and bool(re.search(
-        r"\b(employees?|candidates?|developers?|engineers?|people|person|profiles?|professionals?|recruits?|applicants?|staff|workers?|users?|who|someone|anyone)\b.*?\b(with|wth|wit|skilled|having|knowing|expert|proficient|specializing|using|as\s+a\s+skill|asa?\s+programming\s+skill|experience|skills?)\b",
-        raw
-    )) and not has_explicit_my
-
-    is_third_person_search_verb = (
-        bool(re.search(r"\b(find|search(\s+for)?|show(\s+me)?|give(\s+me)?|look\s+for|get(\s+me)?|list|fetch|suggest(\s+me)?|recommend(\s+me)?)\s+(?:all\s+)?(employees?|candidates?|developers?|engineers?|people|person|profiles?|professionals?|users?|[a-z]+)\b", raw))
-        and not has_explicit_my
-        and not bool(re.search(r"\b(jobs?|roles?|vacanc|openings?)\b", raw))
-    )
-
-    is_third_person_candidate_query = is_possessive_name_query or is_people_entity_query or is_third_person_search_verb
-    if is_third_person_candidate_query:
-        return []
 
     # Exclude past/previous employment job queries from job search
     is_past_jobs_query = bool(re.search(r"\b(previous|past|last|old|prior)\s+jobs?\b", raw)) or bool(re.search(r"\b(work\s+experience|employment\s+history)\b", raw))
@@ -287,7 +325,7 @@ def parse_user_data_intents_deterministic(text: str) -> List[UserIntent]:
     # LEVEL 2: Employment / Company-Specific Context (EMPLOYMENT_*)
     # -------------------------------------------------------------------
     # Employment Skills
-    if re.search(r"\bskil*s?.*?\b(used|applied|at|in|during)\b.*?\b(previous|past|last|company|work|job|employ?ment)\b", raw) or re.search(r"\bskil*s?.*?\bfor\b.*?\b(previous|past|last|company|work|job|employ?ment)\b", raw) or "work skill" in raw or "company skill" in raw:
+    if re.search(r"\bskil*s?.*?\b(used|applied|at|in|during|under)\b.*?\b(previous|past|last|company|work|job|employ?ment)\b", raw) or re.search(r"\bskil*s?.*?\bfor\b.*?\b(previous|past|last|company|work|job|employ?ment)\b", raw) or "work skill" in raw or "company skill" in raw:
         if not re.search(r"\b(profile\s+skil*s?|skil*s?\s+on\s+my\s+profile)\b", raw) or re.search(r"\b(previous|past|last|company|zenith|work|job)\b", raw):
             intents.add(UserIntent.EMPLOYMENT_SKILLS)
 

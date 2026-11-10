@@ -37,6 +37,52 @@ class SearchCriteria(BaseModel):
     clear_filters: Optional[List[str]] = None
     skill_operation: Optional[str] = None
 
+    def merge_filter_delta(self, filter_delta: Dict[str, Any]) -> "SearchCriteria":
+        """
+        Pure, validated merge of a QueryRewriterResult filter_delta onto an existing SearchCriteria instance.
+        Preserves all active filters and selectively updates delta keys according to the schema.
+        """
+        if not filter_delta:
+            return self.model_copy(deep=True) if hasattr(self, "model_copy") else self.copy(deep=True)
+
+        copied = self.model_copy(deep=True) if hasattr(self, "model_copy") else self.copy(deep=True)
+
+        if "job_mode" in filter_delta:
+            val = filter_delta["job_mode"]
+            copied.work_mode = val
+            if val == "home":
+                copied.remote = True
+            elif val in ("office", "hybrid", "field"):
+                copied.remote = False
+        elif "work_mode" in filter_delta:
+            val = filter_delta["work_mode"]
+            copied.work_mode = val
+            if val == "home":
+                copied.remote = True
+
+        if "seniority_level" in filter_delta:
+            copied.seniority_level = filter_delta["seniority_level"]
+
+        if "experience_min" in filter_delta:
+            copied.experience_min = filter_delta["experience_min"]
+            copied.experience_level = str(filter_delta["experience_min"])
+
+        if "experience_max" in filter_delta:
+            copied.experience_max = filter_delta["experience_max"]
+
+        if "company" in filter_delta:
+            copied.company = filter_delta["company"]
+
+        if "location" in filter_delta:
+            copied.location = filter_delta["location"]
+            copied.canonical_location = filter_delta["location"]
+            copied.location_mode = LocationMode.EXPLICIT
+
+        if "title" in filter_delta:
+            copied.title = filter_delta["title"]
+
+        return copied
+
     @classmethod
     def from_parsed_dict(cls, parsed_dict: Dict[str, Any]) -> "SearchCriteria":
         """

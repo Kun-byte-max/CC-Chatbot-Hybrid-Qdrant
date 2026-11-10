@@ -4,7 +4,7 @@ recommendation_service.py — Service layer for orchestrating DB data retrieval 
 
 import logging
 import re
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 
 try:
     from backend.recommendation.recommendation_engine import RecommendationEngine
@@ -69,6 +69,40 @@ def parse_followup_rank_or_id(user_message: Optional[str]) -> Tuple[Optional[int
             pass
 
     return None, True
+
+
+def parse_all_followup_ranks(user_message: Optional[str]) -> List[int]:
+    """
+    Parses conversational follow-up message to extract all unique 1-based ranks in order of occurrence.
+    E.g. "compare the first and second ones" -> [1, 2]
+    """
+    if not user_message:
+        return []
+
+    msg_lower = user_message.lower().strip()
+    ranks: List[int] = []
+
+    # Map words and digits along with their character positions
+    found: List[Tuple[int, int]] = []  # (start_pos, rank_val)
+
+    for word, val in ORDINAL_MAP.items():
+        for m in re.finditer(r'\b' + re.escape(word) + r'\b', msg_lower):
+            found.append((m.start(), val))
+
+    for m in re.finditer(r'\b(?:job|rank|position|#)?\s*(\d+)(?:st|nd|rd|th)?\b', msg_lower):
+        try:
+            val = int(m.group(1))
+            found.append((m.start(), val))
+        except ValueError:
+            pass
+
+    found.sort(key=lambda x: x[0])
+    for _, val in found:
+        if val not in ranks:
+            ranks.append(val)
+
+    return ranks
+
 
 
 def get_ordinal_suffix(n: int) -> str:
@@ -189,6 +223,7 @@ class RecommendationService:
         search_query_title: Optional[str] = None,
         search_query_location: Optional[str] = None,
         search_query_work_mode: Optional[str] = None,
+        search_gen: Optional[int] = None,
     ) -> Tuple[List[RecommendationResult], Dict[str, Any], List[RecommendationResult]]:
         """
         Ranks all candidate pool jobs and applies post-ranking pagination slicing.
@@ -212,14 +247,18 @@ class RecommendationService:
         current_page = max(1, min(page, total_pages))
 
         if session_id and all_recs:
-            query_key = f"cand_{candidate_profile.id if hasattr(candidate_profile, 'id') else 'default'}"
+            cand_id_val = getattr(candidate_profile, 'id', None)
+            query_key = f"cand_{cand_id_val if cand_id_val is not None else 'default'}"
             set_recommendation_session(
                 session_id=session_id,
                 query_key=query_key,
                 ranked_jobs=all_recs,
                 current_page=current_page,
                 page_size=per_page,
-                total_jobs=total_results
+                total_jobs=total_results,
+                role="employee",
+                user_id=cand_id_val,
+                search_gen=search_gen,
             )
 
         if total_results > 0:
@@ -253,6 +292,7 @@ class RecommendationService:
         session_id: Optional[str] = None,
         page: int = 1,
         per_page: int = 5,
+        search_gen: Optional[int] = None,
     ) -> Tuple[List[RecommendationResult], Dict[str, Any], List[RecommendationResult], bool]:
         """
         Attempts to retrieve personalized job recommendations from the deployed Job Match API.
@@ -267,7 +307,8 @@ class RecommendationService:
                 candidate_profile=candidate_profile,
                 page=page,
                 per_page=per_page,
-                session_id=session_id
+                session_id=session_id,
+                search_gen=search_gen,
             )
             return slice_recs, meta, all_recs, False
 
@@ -281,7 +322,8 @@ class RecommendationService:
                     candidate_profile=candidate_profile,
                     page=page,
                     per_page=per_page,
-                    session_id=session_id
+                    session_id=session_id,
+                    search_gen=search_gen,
                 )
                 return slice_recs, meta, all_recs, False
 
@@ -370,7 +412,10 @@ class RecommendationService:
                     ranked_jobs=all_recs,
                     current_page=current_page,
                     page_size=per_page,
-                    total_jobs=total_results
+                    total_jobs=total_results,
+                    role="employee",
+                    user_id=candidate_id,
+                    search_gen=search_gen,
                 )
 
             start_index = (current_page - 1) * per_page + 1
@@ -396,7 +441,8 @@ class RecommendationService:
                 candidate_profile=candidate_profile,
                 page=page,
                 per_page=per_page,
-                session_id=session_id
+                session_id=session_id,
+                search_gen=search_gen,
             )
             return slice_recs, meta, all_recs, False
 
@@ -406,7 +452,8 @@ class RecommendationService:
                 candidate_profile=candidate_profile,
                 page=page,
                 per_page=per_page,
-                session_id=session_id
+                session_id=session_id,
+                search_gen=search_gen,
             )
             return slice_recs, meta, all_recs, False
 
@@ -416,7 +463,8 @@ class RecommendationService:
                 candidate_profile=candidate_profile,
                 page=page,
                 per_page=per_page,
-                session_id=session_id
+                session_id=session_id,
+                search_gen=search_gen,
             )
             return slice_recs, meta, all_recs, False
 
@@ -426,6 +474,9 @@ class RecommendationService:
         user_message: Optional[str] = None,
         target_rank: Optional[int] = None,
         target_job_id: Optional[Any] = None,
+        allow_ambiguous_fallback: bool = True,
+        role: Optional[str] = None,
+        user_id: Optional[Union[str, int]] = None,
     ) -> Dict[str, Any]:
         """
         Resolves pre-computed RecommendationResult snapshot from active recommendation session state.
@@ -437,7 +488,7 @@ class RecommendationService:
         
         Zero DB search, zero re-scoring, zero API retrieval.
         """
-        rec_session = get_recommendation_session(session_id)
+        rec_session = get_recommendation_session(session_id, role=role, user_id=user_id)
         if not rec_session or not rec_session.get("ranked_jobs"):
             return {
                 "success": False,
@@ -493,30 +544,45 @@ class RecommendationService:
                     resolved_snapshot = r
                     break
 
-        # Priority 4: Current page first job fallback (dynamic page_size from session context)
-        if resolved_snapshot is None and current_page > 1:
-            computed_rank = (current_page - 1) * page_size + 1
-            if 1 <= computed_rank <= total_jobs:
-                resolved_snapshot = ranked_jobs[computed_rank - 1]
-
-        # Priority 5: Global Rank #1 Fallback
-        if resolved_snapshot is None and total_jobs > 0:
-            resolved_snapshot = ranked_jobs[0]
+        # Ambiguous fallback guard:
+        # If there is no explicit rank, no UI selection, and no recently referenced job:
+        # - If there is exactly 1 job in total, it is unambiguous: select that single job.
+        # - If multiple jobs exist, do NOT silently guess rank #1; ask the user to clarify which job they mean.
+        if allow_ambiguous_fallback and resolved_snapshot is None:
+            if total_jobs == 1:
+                resolved_snapshot = ranked_jobs[0]
+            else:
+                return {
+                    "success": False,
+                    "error": "Could you please specify which job you are referring to (for example, by job title or rank number)?"
+                }
 
         if resolved_snapshot is None:
             return {"success": False, "error": "Could not resolve the requested job recommendation."}
 
         # Update last_referenced_job_id in active session context
         if getattr(resolved_snapshot, "job_id", None):
-            update_last_referenced_job_id(session_id, resolved_snapshot.job_id)
+            update_last_referenced_job_id(session_id, resolved_snapshot.job_id, role=role, user_id=user_id)
+
+        if isinstance(resolved_snapshot, dict):
+            g_rank = resolved_snapshot.get("global_rank", 1)
+            j_id = resolved_snapshot.get("job_id") or resolved_snapshot.get("id")
+            rec_exp = resolved_snapshot.get("recommendation_explanation") or resolved_snapshot.get("summary") or ""
+            rec_reasons = resolved_snapshot.get("recommendation_reasons", [])
+        else:
+            g_rank = getattr(resolved_snapshot, "global_rank", 1)
+            j_id = getattr(resolved_snapshot, "job_id", None)
+            exp_res = getattr(resolved_snapshot, "explanation_result", None)
+            rec_exp = getattr(exp_res, "summary", "") if exp_res else ""
+            rec_reasons = getattr(resolved_snapshot, "recommendation_reasons", [])
 
         return {
             "success": True,
             "recommendation": resolved_snapshot,
-            "global_rank": getattr(resolved_snapshot, "global_rank", 1),
-            "job_id": getattr(resolved_snapshot, "job_id", None),
-            "recommendation_explanation": getattr(resolved_snapshot.explanation_result, "summary", ""),
-            "recommendation_reasons": getattr(resolved_snapshot, "recommendation_reasons", []),
+            "global_rank": g_rank,
+            "job_id": j_id,
+            "recommendation_explanation": rec_exp,
+            "recommendation_reasons": rec_reasons,
         }
 
     def get_candidate_recommendations(self, candidate_id: int, top_n: int = 5) -> List[RecommendationResult]:
@@ -570,6 +636,7 @@ class RecommendationService:
         per_page: int = 5,
         session_id: Optional[str] = None,
         search_gen: Optional[int] = None,
+        user_id: Optional[Union[str, int]] = None,
     ) -> Tuple[List[Any], Dict[str, Any], List[Any]]:
         """
         Ranks employer candidate recommendations using EmployerRecommendationEngine,
@@ -644,7 +711,7 @@ class RecommendationService:
             pag_dict = pag_state.__dict__.copy()
             if search_gen is not None:
                 pag_dict["search_gen"] = search_gen
-            set_pagination_state(session_id, pag_dict, role="employer")
+            set_pagination_state(session_id, pag_dict, role="employer", user_id=user_id)
 
         pagination_meta = {
             "current_page": current_page,

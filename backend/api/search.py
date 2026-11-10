@@ -256,8 +256,8 @@ async def filter_exploring_users(
                         detail_user_types[r["id"]] = r["user_type"]
 
     except Exception as e:
-        log.error("on_exploring DB error: %s", e)
-        return users
+        log.error("on_exploring DB error: %s", type(e).__name__)
+        raise
 
     def should_show(uid: int) -> bool:
         row = exploring_rows.get(uid)
@@ -826,8 +826,15 @@ async def search_users(
         return res
 
     if needs_exploring:
-        fetch_limit = min(limit * EXPLORING_OVERFETCH_MULTIPLIER, EXPLORING_MAX_FETCH)
         pool = getattr(request.app.state, "db_pool", None)
+        if not pool:
+            log.warning("on_exploring filter required but DB pool is unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail="User search with privacy filtering is temporarily unavailable.",
+            )
+
+        fetch_limit = min(limit * EXPLORING_OVERFETCH_MULTIPLIER, EXPLORING_MAX_FETCH)
 
         collected: List[Dict] = []
         current_offset = offset
@@ -849,7 +856,14 @@ async def search_users(
                 exhausted = True
                 break
 
-            filtered_batch = await filter_exploring_users(batch, login_user_id, pool) if pool else batch
+            try:
+                filtered_batch = await filter_exploring_users(batch, login_user_id, pool)
+            except Exception as e:
+                log.warning("filter_exploring_users failed: %s", type(e).__name__)
+                raise HTTPException(
+                    status_code=503,
+                    detail="User search with privacy filtering is temporarily unavailable.",
+                )
             collected.extend(filtered_batch)
             current_offset += fetch_limit
             iterations += 1

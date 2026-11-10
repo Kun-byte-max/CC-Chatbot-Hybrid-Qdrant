@@ -4,6 +4,7 @@ Pushes hard filters to search_client/search_users and emits structured [EMPLOYER
 """
 
 import uuid
+import time
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -30,6 +31,7 @@ async def execute_employer_candidate_search(
     Emits structured [EMPLOYER_SEARCH] diagnostic log blocks.
     Enforces Phase 1 Qualification Boundary: Zero rank_score / matcher scores applied to determine eligibility.
     """
+    t0 = time.perf_counter()
     if not request_id:
         request_id = f"req_{uuid.uuid4().hex[:8]}"
 
@@ -101,6 +103,33 @@ async def execute_employer_candidate_search(
         search_filters["on_notice"] = True
         filter_log_lines.append(f"on_notice=True [{requirements.on_notice.source.value}]")
 
+    # Categorical applied filter list (categories only, never values)
+    applied_filters = []
+    if requirements.location:
+        loc = requirements.location
+        if loc.city_id:
+            applied_filters.append("city")
+        elif loc.state_id:
+            applied_filters.append("state")
+        elif loc.country_id:
+            applied_filters.append("country")
+    if requirements.role and requirements.role.value:
+        applied_filters.append("role_type")
+    if requirements.skills and requirements.skills.value:
+        applied_filters.append("keyword")
+    if requirements.experience and requirements.experience.min is not None:
+        applied_filters.append("experience")
+    if requirements.fresher and requirements.fresher.value:
+        applied_filters.append("fresher")
+    if requirements.employment_type_id and requirements.employment_type_id.value:
+        applied_filters.append("employment_type")
+    if requirements.department_id and requirements.department_id.value:
+        applied_filters.append("department")
+    if requirements.on_immediate and requirements.on_immediate.value:
+        applied_filters.append("on_immediate")
+    if requirements.on_notice and requirements.on_notice.value:
+        applied_filters.append("on_notice")
+
     # Safe Resolver Failure Check
     if requirements.safe_failure:
         log_block = (
@@ -113,17 +142,40 @@ async def execute_employer_candidate_search(
         )
         log.warning(log_block)
         meta = SearchMetadata(total_matches=0, returned=0, page=page, limit=limit)
-        return [], meta, {"success": False, "failure_reason": requirements.failure_reason}
+        safe_telemetry = {
+            "search_mode": "CANDIDATE_SEARCH",
+            "search_provider": "meilisearch",
+            "provider_status": "skipped",
+            "candidate_search_outcome": "safe_filter_failure",
+            "retrieval_attempted": False,
+            "meilisearch_count": 0,
+            "retrieval_result_count": 0,
+            "final_count": 0,
+            "total_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+            "filters_applied": applied_filters,
+        }
+        return [], meta, {
+            "success": False,
+            "failure_reason": requirements.failure_reason,
+            "search_metadata": meta.dict(),
+            "telemetry": safe_telemetry,
+        }
 
     # 3. Execute Search Client Retrieval
+    t_meili0 = time.perf_counter()
+    provider_failed = False
+    err_type = None
     try:
         res = await search_users(**search_filters)
     except Exception as e:
         log.error("search_users failed in employer_search_executor: %s", e)
         res = {}
-
+        provider_failed = True
+        err_type = type(e).__name__
+    meili_ms = round((time.perf_counter() - t_meili0) * 1000.0, 1)
 
     if not res or not res.get("success"):
+        provider_failed = True
         total_matches = 0
         raw_hits = []
     else:
@@ -147,6 +199,34 @@ async def execute_employer_candidate_search(
     # Map raw documents to StandardizedCandidateObject list
     standard_candidates = [map_doc_to_standard_candidate(doc) for doc in page_slice]
 
+    total_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+
+    if provider_failed:
+        p_status = "unavailable"
+        outcome = "provider_failure"
+    elif total_matches == 0 or len(raw_hits) == 0:
+        p_status = "empty"
+        outcome = "empty_results"
+    else:
+        p_status = "success"
+        outcome = "success_with_results"
+
+    telemetry = {
+        "search_mode": "CANDIDATE_SEARCH",
+        "search_provider": "meilisearch",
+        "provider_status": p_status,
+        "candidate_search_outcome": outcome,
+        "retrieval_attempted": True,
+        "meilisearch_count": total_matches,
+        "retrieval_result_count": returned_count,
+        "meili_ms": meili_ms,
+        "total_ms": total_ms,
+        "provider_latency_ms": {"meilisearch": meili_ms},
+        "filters_applied": applied_filters,
+    }
+    if err_type:
+        telemetry["retrieval_error_type"] = err_type
+
     # Structured [EMPLOYER_SEARCH] & Diagnostic Pipeline Survival Log Block
     log_block = (
         f"\n[EMPLOYER_SEARCH]\n"
@@ -166,11 +246,11 @@ async def execute_employer_candidate_search(
     )
     log.info(log_block)
 
-
     raw_payload = {
-        "success": True,
+        "success": not provider_failed,
         "raw_hits": page_slice,
         "search_metadata": metadata.dict(),
+        "telemetry": telemetry,
     }
 
     return standard_candidates, metadata, raw_payload

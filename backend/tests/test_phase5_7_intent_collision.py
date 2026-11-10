@@ -378,7 +378,7 @@ class TestProfileAdviceRegression:
             f"Query '{query}' produced target '{target}', expected '{expected_target}'"
         )
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     @pytest.mark.parametrize("query", [
         "How can I improve my CollarCheck profile rating?",
         "How do I improve my profile score?",
@@ -476,4 +476,252 @@ class TestProfileAdviceRegression:
         ran_update, _ = should_run_profile_parse("employee", "update my phone number to 9876543210")
         assert ran_update is True
 
+
+class TestPhase5OptimizationLatencyRemovals:
+    """
+    Phase 5 Targeted Tests:
+    Fix A: Gate random-widget fetching
+    1. Ordinary profile-skill job searches do not invoke fetch_random_widgets().
+    2. A query requiring widget enrichment still invokes it when no widget data is supplied.
+    3. Supplied widget data is not overwritten or needlessly fetched.
+    4. Existing widget and urgency behavior remains unchanged.
+
+    Fix B: Avoid profile-update parser false positives
+    1. 'show me jobs according to my skills' skips profile-update parsing.
+    2. Relevant profile-based job-search variants skip the unnecessary parse.
+    3. 'add Python to my skills' remains eligible for profile-update parsing.
+    4. 'remove Java from my skills' remains eligible.
+    5. 'update my skills' remains eligible.
+    6. Existing intent-collision tests remain green.
+    """
+
+    @pytest.mark.parametrize("query", [
+        "show me jobs according to my skills",
+        "find jobs based on my skills",
+        "recommend jobs according to my profile",
+        "jobs matching my skills",
+        "jobs relevant to my skills",
+        "jobs suited for my profile",
+        "jobs suitable for my experience",
+        "jobs as per my skills",
+        "jobs for me",
+        "suitable jobs for me",
+        "jobs suitable for me",
+        "jobs for my skills",
+        "i said jobs as per my skills",
+        "find software analyst jobs according to my skills",
+    ])
+    def test_profile_job_search_skips_profile_parse(self, query: str):
+        from backend.utils.gates import should_run_profile_parse
+        ran, reason = should_run_profile_parse("employee", query)
+        assert ran is False, f"Query '{query}' should have skipped profile parse"
+        assert reason == "skip_profile_job_search"
+
+    @pytest.mark.parametrize("query", [
+        "add Python to my skills",
+        "remove Java from my skills",
+        "update my skills",
+        "update my phone number to 9876543210",
+        "my name is Alice",
+        "i worked at Tech Corp",
+    ])
+    def test_genuine_profile_updates_remain_eligible(self, query: str):
+        from backend.utils.gates import should_run_profile_parse
+        ran, reason = should_run_profile_parse("employee", query)
+        assert ran is True, f"Genuine update '{query}' should be eligible for profile parse"
+        assert reason == "ran_hint_matched"
+
+    def test_mixed_intent_with_update_remains_eligible(self):
+        from backend.utils.gates import should_run_profile_parse
+        ran, reason = should_run_profile_parse("employee", "update my skills to Python and find me jobs")
+        assert ran is True, "Mixed intent with update verb must remain eligible for profile parse"
+        assert reason == "ran_hint_matched"
+
+    @pytest.mark.parametrize("query,expected", [
+        ("show me jobs closing soon", True),
+        ("jobs closing soon", True),
+        ("urgent positions", True),
+        ("show me the widget", True),
+        ("closing", True),
+        ("show me jobs according to my skills", False),
+        ("find software analyst jobs", False),
+        ("what are my skills", False),
+        ("", False),
+    ])
+    def test_is_widget_relevant_query_predicate(self, query: str, expected: bool):
+        from backend.utils.gates import is_widget_relevant_query
+        assert is_widget_relevant_query(query) is expected
+
+    def test_ordinary_job_search_does_not_invoke_fetch_random_widgets(self):
+        """Fix A (1): Ordinary profile-skill job search does not invoke fetch_random_widgets()."""
+        from fastapi.testclient import TestClient
+        from unittest.mock import AsyncMock, patch
+        from backend.main import app, verify_token
+
+        def _override(request=None, credentials=None):
+            if request is not None and hasattr(request, "state"):
+                request.state.user_id = 1001
+                request.state.db_user_id = 1001
+                request.state.role = "employee"
+                request.state.email = "test@example.com"
+            return {"uid": 1001, "email": "test@example.com", "role": "employee"}
+
+        app.dependency_overrides[verify_token] = _override
+        client = TestClient(app)
+
+        mock_dispatch_res = {
+            "db_context": "Found 1 matching job",
+            "results": [{"job_id": 101, "title": "Developer", "company": "Tech Corp", "url": "https://collarcheck.com/jobs/101"}],
+            "result_type": "jobs",
+            "allowed_ids": {101},
+            "raw_hits": [],
+            "pagination": None,
+        }
+
+        mock_parsed = {
+            "keyword": "developer",
+            "search_target": "JOBS",
+            "skill_source": "PROFILE",
+            "use_profile_skills": True,
+            "is_search_intent": True,
+        }
+
+        try:
+            with patch("backend.services.user_data_service.handle_query") as mock_uds, \
+                 patch("backend.services.search_router.dispatch_search_target", new=AsyncMock(return_value=mock_dispatch_res)), \
+                 patch("backend.services.search_parser.parse_search_query", new=AsyncMock(return_value=mock_parsed)), \
+                 patch("backend.services.profile_parser.parse_profile_update") as mock_profile_parse, \
+                 patch("backend.services.platform_api.fetch_random_widgets") as mock_fetch_widgets, \
+                 patch("backend.services.llm_service.LLMService.get_chat_completion", new=AsyncMock(return_value="Jobs:")):
+
+                resp = client.post("/chat", json={
+                    "messages": [{"role": "user", "content": "show me jobs according to my skills"}],
+                    "session_id": "test_sess_opt_1",
+                })
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["success"] is True
+                # Fix A: fetch_random_widgets MUST NOT be invoked
+                assert mock_fetch_widgets.called is False, "fetch_random_widgets was invoked for ordinary job search"
+                # Fix B: parse_profile_update MUST NOT be invoked
+                assert mock_profile_parse.called is False, "parse_profile_update was invoked for ordinary job search"
+        finally:
+            app.dependency_overrides.pop(verify_token, None)
+
+    def test_query_requiring_widget_enrichment_invokes_fetch_random_widgets(self):
+        """Fix A (2): Query requiring widget enrichment invokes fetch_random_widgets() when unsupplied."""
+        from fastapi.testclient import TestClient
+        from unittest.mock import AsyncMock, patch
+        from backend.main import app, verify_token
+
+        def _override(request=None, credentials=None):
+            if request is not None and hasattr(request, "state"):
+                request.state.user_id = 1001
+                request.state.db_user_id = 1001
+                request.state.role = "employee"
+                request.state.email = "test@example.com"
+            return {"uid": 1001, "email": "test@example.com", "role": "employee"}
+
+        app.dependency_overrides[verify_token] = _override
+        client = TestClient(app)
+
+        mock_widgets_payload = [
+            {
+                "heading": "Position Closing Soon",
+                "slug": "position-closing-soon",
+                "list": [{
+                    "id": 999,
+                    "job_title": "Urgent Security Engineer",
+                    "company_name": "SecureCorp",
+                    "city_name": "Bangalore"
+                }]
+            }
+        ]
+
+        mock_parsed = {
+            "keyword": None,
+            "search_target": "UNKNOWN",
+            "skill_source": "NONE",
+            "use_profile_skills": False,
+            "is_search_intent": False,
+        }
+
+        try:
+            with patch("backend.services.platform_api.fetch_random_widgets", return_value=mock_widgets_payload) as mock_fetch_widgets, \
+                 patch("backend.services.search_parser.parse_search_query", new=AsyncMock(return_value=mock_parsed)), \
+                 patch("backend.services.llm_service.LLMService.get_chat_completion", new=AsyncMock(return_value="Closing soon jobs:")):
+
+                resp = client.post("/chat", json={
+                    "messages": [{"role": "user", "content": "show me jobs closing soon"}],
+                    "session_id": "test_sess_opt_2",
+                })
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["success"] is True
+                # Fix A (2): fetch_random_widgets MUST be invoked because query is widget-relevant and widgets_data unsupplied
+                assert mock_fetch_widgets.called is True
+                assert data.get("result_type") == "jobs"
+                assert len(data.get("jobs", [])) == 1
+                assert data["jobs"][0]["job_id"] == 999
+        finally:
+            app.dependency_overrides.pop(verify_token, None)
+
+    def test_supplied_widgets_data_preserved_and_not_needlessly_fetched(self):
+        """Fix A (3): Caller-supplied widget data is not overwritten or needlessly fetched."""
+        from fastapi.testclient import TestClient
+        from unittest.mock import AsyncMock, patch
+        from backend.main import app, verify_token
+
+        def _override(request=None, credentials=None):
+            if request is not None and hasattr(request, "state"):
+                request.state.user_id = 1001
+                request.state.db_user_id = 1001
+                request.state.role = "employee"
+                request.state.email = "test@example.com"
+            return {"uid": 1001, "email": "test@example.com", "role": "employee"}
+
+        app.dependency_overrides[verify_token] = _override
+        client = TestClient(app)
+
+        supplied_widgets = [
+            {
+                "heading": "Position Closing Soon",
+                "slug": "position-closing-soon",
+                "list": [{
+                    "id": 888,
+                    "job_title": "Pre-supplied Architect",
+                    "company_name": "SuppliedCorp",
+                    "city_name": "Mumbai"
+                }]
+            }
+        ]
+
+        mock_parsed = {
+            "keyword": None,
+            "search_target": "UNKNOWN",
+            "skill_source": "NONE",
+            "use_profile_skills": False,
+            "is_search_intent": False,
+        }
+
+        try:
+            with patch("backend.services.platform_api.fetch_random_widgets") as mock_fetch_widgets, \
+                 patch("backend.services.search_parser.parse_search_query", new=AsyncMock(return_value=mock_parsed)), \
+                 patch("backend.services.llm_service.LLMService.get_chat_completion", new=AsyncMock(return_value="Closing soon jobs:")):
+
+                resp = client.post("/chat", json={
+                    "messages": [{"role": "user", "content": "show me jobs closing soon"}],
+                    "session_id": "test_sess_opt_3",
+                    "widgets_data": supplied_widgets,
+                })
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["success"] is True
+                # Fix A (3): fetch_random_widgets MUST NOT be invoked because widgets_data was supplied
+                assert mock_fetch_widgets.called is False
+                assert data.get("result_type") == "jobs"
+                assert len(data.get("jobs", [])) == 1
+                assert data["jobs"][0]["job_id"] == 888
+        finally:
+            app.dependency_overrides.pop(verify_token, None)
 
