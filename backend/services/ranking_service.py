@@ -20,10 +20,23 @@ except ModuleNotFoundError:
     from repositories.job_repository import JobRepository
     from utils.utils import is_faq_query
 
+try:
+    from backend.utils.session_state import generate_secure_session_id
+except ModuleNotFoundError:
+    from utils.session_state import generate_secure_session_id  # type: ignore
+
+# DEPRECATED: Legacy in-memory employer session dictionary.
+# Authoritative multi-worker session state is stored in Redis via backend.utils.session_state.
+# This dictionary is retained solely for legacy compatibility with gates.py fallback checks.
 EMPLOYER_SESSIONS = {}
 
 def get_employer_session(session_id: str, role: str = "employer") -> dict:
-    sid = f"{role}_{session_id}" if session_id else f"{role}_default_session"
+    """
+    DEPRECATED: Legacy in-memory helper.
+    Authoritative state must be accessed via backend.utils.session_state.
+    """
+    clean_sid = session_id if (session_id and str(session_id).lower() != "default_session") else generate_secure_session_id()
+    sid = f"{role}_{clean_sid}"
     if sid not in EMPLOYER_SESSIONS:
         EMPLOYER_SESSIONS[sid] = {
             "job_profile": None,
@@ -35,7 +48,12 @@ def get_employer_session(session_id: str, role: str = "employer") -> dict:
     return EMPLOYER_SESSIONS[sid]
 
 def reset_employer_session(session_id: str, role: str = "employer"):
-    sid = f"{role}_{session_id}" if session_id else f"{role}_default_session"
+    """
+    DEPRECATED: Legacy in-memory helper.
+    Authoritative state must be reset via backend.utils.session_state.
+    """
+    clean_sid = session_id if (session_id and str(session_id).lower() != "default_session") else generate_secure_session_id()
+    sid = f"{role}_{clean_sid}"
     EMPLOYER_SESSIONS[sid] = {
         "job_profile": None,
         "experience_band": None,

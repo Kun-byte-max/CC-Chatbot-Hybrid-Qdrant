@@ -10,6 +10,22 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 MODEL = "gpt-4o-mini"
 
+LANGFUSE_ENABLED = os.getenv("LANGFUSE_ENABLED", "false").lower() in ("true", "1", "yes")
+
+# Redis Configuration (RAM-only session and conversation history store)
+REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() in ("true", "1", "yes")
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "50"))
+REDIS_CONNECT_TIMEOUT_SECONDS = float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "2.0"))
+REDIS_SOCKET_TIMEOUT_SECONDS = float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "2.0"))
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
+MAX_SESSION_MESSAGES = int(os.getenv("MAX_SESSION_MESSAGES", "100"))
+MAX_SESSION_BYTES = int(os.getenv("MAX_SESSION_BYTES", "524288"))  # 512 KB
+MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "8000"))
+
 SEARCH_API_URL = os.getenv("SEARCH_API_URL", "http://localhost:8000")
 SEARCH_API_KEY = os.getenv("SEARCH_API_KEY", "")
 

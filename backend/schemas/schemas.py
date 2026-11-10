@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import Optional, List, Any, Union, Dict
 
 class LoginRequest(BaseModel):
@@ -10,10 +10,11 @@ class ChatMessage(BaseModel):
     content: str
 
 class ChatRequest(BaseModel):
-    messages: List[ChatMessage]
+    messages: Optional[List[ChatMessage]] = None
+    message: Optional[str] = None
     resume_context: Optional[str] = None
     user_type: Optional[str] = "employee"
-    session_id: Optional[str] = "default_session"
+    session_id: Optional[str] = None
     user_id: Optional[str] = None
     user_location: Optional[Union[str, Dict[str, Any]]] = None
     latitude: Optional[float] = None
@@ -21,6 +22,14 @@ class ChatRequest(BaseModel):
     user_detail: Optional[Dict[str, Any]] = None
     widgets_data: Optional[Any] = None
     action: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_at_least_one_message_or_action(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "message" not in data and "messages" not in data and "action" not in data:
+                raise ValueError("Either 'message', 'messages', or 'action' must be provided.")
+        return data
 
 class GeocodeRequest(BaseModel):
     latitude: float
@@ -102,6 +111,7 @@ class ChatResponse(BaseModel):
     reply: str
     success: bool
     request_id: Optional[str] = None
+    session_id: Optional[str] = None
     results: Optional[List[Union[JobCard, CandidateCard, OrganizationCard, EducationCard, Dict[str, Any], Any]]] = None
     result_type: Optional[str] = None
     presentation_mode: Optional[str] = None

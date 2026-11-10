@@ -1,0 +1,303 @@
+name: Redis 7 Multi-Worker Integration Gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  redis7-integration-gate:
+    name: Redis 7 Real Multi-Worker Deployment Gate
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 5
+
+    env:
+      REDIS_ENABLED: "true"
+      REDIS_HOST: "127.0.0.1"
+      REDIS_PORT: "6379"
+      REDIS_DB: "1"
+      REDIS_CONNECT_TIMEOUT_SECONDS: "2.0"
+      REDIS_SOCKET_TIMEOUT_SECONDS: "2.0"
+      LANGFUSE_ENABLED: "false"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest pyyaml
+
+      - name: Verify Redis Service Health & TCP Connectivity
+        run: |
+          python - << 'EOF'
+          import socket
+          import sys
+
+          host = "127.0.0.1"
+          port = 6379
+          try:
+              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              s.settimeout(3.0)
+              res = s.connect_ex((host, port))
+              s.close()
+              if res != 0:
+                  print(f"ERROR: Cannot connect to Redis at {host}:{port} (socket error {res})")
+                  sys.exit(1)
+              print(f"SUCCESS: TCP port {port} is open and reachable on {host}.")
+          except Exception as exc:
+              print(f"ERROR: Socket connection probe failed: {exc}")
+              sys.exit(1)
+          EOF
+
+      - name: Configure and Assert Redis Runtime Settings
+        run: |
+          python - << 'EOF'
+          import sys
+          import redis
+
+          try:
+              r = redis.Redis(host="127.0.0.1", port=6379, db=0, decode_responses=True)
+              pong = r.ping()
+              if not pong:
+                  print("ERROR: Redis ping returned falsy response.")
+                  sys.exit(1)
+              print("SUCCESS: Redis ping responded PONG.")
+
+              # Apply mandatory RAM-only non-persistence and memory-bounding settings
+              r.config_set("save", "")
+              r.config_set("appendonly", "no")
+              r.config_set("maxmemory", "268435456")  # 256MB in bytes
+              r.config_set("maxmemory-policy", "noeviction")
+
+              # Read back and strictly assert each setting
+              save_val = r.config_get("save").get("save", None)
+              appendonly_val = r.config_get("appendonly").get("appendonly", None)
+              maxmemory_val = r.config_get("maxmemory").get("maxmemory", None)
+              policy_val = r.config_get("maxmemory-policy").get("maxmemory-policy", None)
+
+              print(f"Verified Redis Runtime Configuration:")
+              print(f"  save:             '{save_val}'")
+              print(f"  appendonly:       '{appendonly_val}'")
+              print(f"  maxmemory:        '{maxmemory_val}' bytes")
+              print(f"  maxmemory-policy: '{policy_val}'")
+
+              assert save_val == "", f"Assertion failed: save expected '', got '{save_val}'"
+              assert appendonly_val == "no", f"Assertion failed: appendonly expected 'no', got '{appendonly_val}'"
+              assert maxmemory_val == "268435456", f"Assertion failed: maxmemory expected '268435456', got '{maxmemory_val}'"
+              assert policy_val == "noeviction", f"Assertion failed: maxmemory-policy expected 'noeviction', got '{policy_val}'"
+
+              print("SUCCESS: All Redis runtime configuration assertions PASSED.")
+          except Exception as exc:
+              print(f"ERROR: Redis runtime configuration verification failed: {exc}")
+              sys.exit(1)
+          EOF
+
+      - name: Log Test Environment Diagnostics
+        run: |
+          python - << 'EOF'
+          import os
+
+          print("==================================================")
+          print("REDIS INTEGRATION TEST ENVIRONMENT DIAGNOSTICS")
+          print("==================================================")
+          print(f"  REDIS_ENABLED:                 {os.getenv('REDIS_ENABLED')}")
+          print(f"  REDIS_HOST:                    {os.getenv('REDIS_HOST')}")
+          print(f"  REDIS_PORT:                    {os.getenv('REDIS_PORT')}")
+          print(f"  REDIS_DB:                      {os.getenv('REDIS_DB')}")
+          print(f"  REDIS_CONNECT_TIMEOUT_SECONDS: {os.getenv('REDIS_CONNECT_TIMEOUT_SECONDS')}")
+          print(f"  REDIS_SOCKET_TIMEOUT_SECONDS:  {os.getenv('REDIS_SOCKET_TIMEOUT_SECONDS')}")
+          print(f"  LANGFUSE_ENABLED:              {os.getenv('LANGFUSE_ENABLED')}")
+          print("  AUTH CREDENTIALS:              [NONE / ISOLATED LOCAL SERVICE]")
+          print("==================================================")
+          EOF
+
+      - name: Create Reports Directory & Record Pre-Test Redis Commands
+        run: |
+          mkdir -p reports
+          python - << 'EOF'
+          import redis
+
+          r = redis.Redis(host="127.0.0.1", port=6379, db=1)
+          info = r.info("stats")
+          initial_cmds = info.get("total_commands_processed", 0)
+          with open("reports/initial_cmd_count.txt", "w") as f:
+              f.write(str(initial_cmds))
+          print(f"Recorded initial Redis total_commands_processed: {initial_cmds}")
+          EOF
+
+      - name: Run Phase 2D Cross-Worker Suite
+        run: |
+          python -m pytest backend/tests/test_phase2d_cross_worker.py -v --junitxml=reports/phase2d_cross_worker.xml
+
+      - name: Run Phase 2C Redis Conversation History Suite
+        run: |
+          python -m pytest backend/tests/test_redis_conversation_history.py -v --junitxml=reports/redis_conversation_history.xml
+
+      - name: Run Targeted Redis Session Regression Suite
+        run: |
+          python -m pytest backend/tests/test_redis_session.py -v --junitxml=reports/redis_session.xml
+
+      - name: Run Targeted Phase 2C.2 Pipeline Integration Regression Suite
+        run: |
+          python -m pytest backend/tests/test_phase2c2_pipeline_integration.py -v --junitxml=reports/phase2c2_pipeline.xml
+
+      - name: Run SSE Streaming Regression Suite
+        run: |
+          python -m pytest backend/tests/test_sse_streaming.py -v --junitxml=reports/sse_streaming.xml
+
+      - name: Run SSE Keepalive Streaming Suite
+        run: |
+          python -m pytest backend/tests/test_phase5_sse_keepalive.py -v --junitxml=reports/sse_keepalive.xml
+
+      - name: Run SSE Hardening Regression Suite
+        run: |
+          python -m pytest backend/tests/test_phase4_1_sse_hardening.py -v --junitxml=reports/sse_hardening.xml
+
+      - name: Run Conversation Context Facade Suite
+        run: |
+          python -m pytest backend/tests/test_conversation_context.py -v --junitxml=reports/conversation_context.xml
+
+      - name: Run Query Rewriter Regression Suite
+        run: |
+          python -m pytest backend/tests/test_query_rewriter.py -v --junitxml=reports/query_rewriter.xml
+
+      - name: Enforce Real-Test Execution, Zero Skips & Non-Substitution Gate
+        run: |
+          python - << 'EOF'
+          import sys
+          import os
+          import xml.etree.ElementTree as ET
+          import redis
+
+          # 1. Target test definitions
+          EXPECTED_CROSS_WORKER_TESTS = {
+              "test_cross_process_session_state_isolation",
+              "test_cross_process_concurrent_cas_search_gen",
+              "test_cross_process_conversation_history_monotonicity",
+              "test_cross_process_worker_restart_pool_cleanup",
+          }
+
+          EXPECTED_CONVERSATION_HISTORY_TESTS = {
+              "test_real_redis_01_empty_snapshot",
+              "test_real_redis_02_snapshot_multiple_commits",
+              "test_real_redis_03_snapshot_after_pair_trimming",
+              "test_real_redis_04_snapshot_concurrent_append",
+              "test_real_redis_05_snapshot_clear_consistency",
+              "test_real_redis_06_snapshot_ttl_refresh_all_keys",
+          }
+
+          ALL_REAL_TESTS = EXPECTED_CROSS_WORKER_TESTS | EXPECTED_CONVERSATION_HISTORY_TESTS
+
+          def parse_junit_testcases(xml_path):
+              if not os.path.exists(xml_path):
+                  print(f"ERROR: Missing XML report at {xml_path}")
+                  sys.exit(1)
+              tree = ET.parse(xml_path)
+              root = tree.getroot()
+              cases = {}
+              for tc in root.iter("testcase"):
+                  name = tc.attrib.get("name")
+                  skipped = tc.find("skipped")
+                  failure = tc.find("failure")
+                  error = tc.find("error")
+
+                  if skipped is not None:
+                      cases[name] = ("SKIPPED", skipped.attrib.get("message", "Unknown skip reason"))
+                  elif failure is not None:
+                      cases[name] = ("FAILED", failure.attrib.get("message", "Failure"))
+                  elif error is not None:
+                      cases[name] = ("ERROR", error.attrib.get("message", "Error"))
+                  else:
+                      cases[name] = ("PASSED", "")
+              return cases
+
+          cw_cases = parse_junit_testcases("reports/phase2d_cross_worker.xml")
+          ch_cases = parse_junit_testcases("reports/redis_conversation_history.xml")
+
+          merged_cases = {**cw_cases, **ch_cases}
+
+          print("==================================================")
+          print("REAL REDIS 7 DEPLOYMENT GATE VERIFICATION REPORT")
+          print("==================================================")
+
+          gate_failed = False
+          verified_passed = 0
+
+          for test_name in sorted(ALL_REAL_TESTS):
+              if test_name not in merged_cases:
+                  print(f"  [MISSING] {test_name}: Test was NOT collected or executed!")
+                  gate_failed = True
+                  continue
+
+              status, detail = merged_cases[test_name]
+              if status == "PASSED":
+                  print(f"  [PASS]    {test_name}")
+                  verified_passed += 1
+              elif status == "SKIPPED":
+                  print(f"  [SKIP]    {test_name} - REASON: {detail}")
+                  print(f"            GATE VIOLATION: Real Redis test was skipped!")
+                  gate_failed = True
+              else:
+                  print(f"  [{status}]  {test_name} - DETAIL: {detail}")
+                  gate_failed = True
+
+          print("--------------------------------------------------")
+          print(f"Total Target Real-Redis Tests: {len(ALL_REAL_TESTS)}")
+          print(f"Verified Executed & Passed:    {verified_passed}")
+          print("--------------------------------------------------")
+
+          # 2. FakeRedis Non-Substitution Check via Live Redis Command Counters
+          try:
+              with open("reports/initial_cmd_count.txt", "r") as f:
+                  initial_cmds = int(f.read().strip())
+              r = redis.Redis(host="127.0.0.1", port=6379, db=1)
+              final_cmds = r.info("stats").get("total_commands_processed", 0)
+              delta_cmds = final_cmds - initial_cmds
+              print(f"Live Redis Commands Processed During Run: {delta_cmds}")
+
+              # Minimum realistic command count for 10 integration tests is > 20 commands
+              if delta_cmds < 20:
+                  print(f"ERROR: Live Redis command count delta ({delta_cmds}) is below minimum threshold (20).")
+                  print("FakeRedis substitution suspected!")
+                  gate_failed = True
+              else:
+                  print(f"SUCCESS: Real Redis received genuine network commands (Delta: {delta_cmds}).")
+          except Exception as exc:
+              print(f"ERROR: Failed to verify live Redis command delta: {exc}")
+              gate_failed = True
+
+          print("==================================================")
+          if gate_failed or verified_passed != len(ALL_REAL_TESTS):
+              print("VERDICT: GATE REJECTED. Real Redis 7 deployment criteria NOT satisfied.")
+              sys.exit(1)
+          else:
+              print("VERDICT: GATE ACCEPTED. All 10 real Redis 7 tests executed and passed without mocks.")
+          print("==================================================")
+          EOF
+
+      - name: Upload Test Results and Diagnostic Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collarcheck-redis7-gate-reports
+          path: reports/
+          if-no-files-found: warn
+

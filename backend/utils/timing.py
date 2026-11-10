@@ -3,7 +3,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ class TimingContext:
         self.history_messages_sent: int = 0
         self.history_messages_dropped: int = 0
         self.reply_validation_violated: bool = False
+        self.ttft_ms: Optional[float] = None
+        self.retrieval_metadata: Optional[Dict[str, Any]] = None
 
     def mark_stage(self, stage_name: str, ms: int) -> None:
         try:
@@ -160,5 +162,22 @@ def set_validation_flag(violated: bool) -> None:
         ctx = get_request_timing()
         if ctx is not None:
             ctx.reply_validation_violated = violated
+    except Exception:
+        pass
+
+def set_ttft(ttft_ms: float) -> None:
+    try:
+        ctx = get_request_timing()
+        if ctx is not None:
+            ctx.ttft_ms = round(float(ttft_ms), 2)
+            ctx.mark_stage("ttft", max(0, int(round(ttft_ms))))
+    except Exception:
+        pass
+
+def set_retrieval_metadata(retrieval_metadata: Optional[Dict[str, Any]]) -> None:
+    try:
+        ctx = get_request_timing()
+        if ctx is not None:
+            ctx.retrieval_metadata = retrieval_metadata
     except Exception:
         pass
